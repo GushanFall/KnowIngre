@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>知食分子 KnowIngre · 登录</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    .login-page {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .login-card {
+      background: var(--surface-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xl);
+      padding: 40px 32px;
+      max-width: 400px;
+      width: 100%;
+      box-shadow: var(--shadow-lg);
+      animation: modalIn 0.4s var(--ease-out);
+    }
+    .login-brand {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    .login-brand .brand-mark {
+      font-size: 2rem;
+      color: var(--clay);
+      display: block;
+      margin-bottom: 8px;
+    }
+    .login-brand h1 {
+      font-family: var(--font-display);
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--ink);
+    }
+    .login-brand p {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+    .login-tabs {
+      display: flex;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+    }
+    .login-tab {
+      flex: 1;
+      padding: 10px;
+      border: none;
+      background: none;
+      font-size: 0.95rem;
+      font-family: var(--font-body);
+      cursor: pointer;
+      color: var(--text-muted);
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s var(--ease-out);
+    }
+    .login-tab.active {
+      color: var(--clay);
+      font-weight: 600;
+      border-bottom-color: var(--clay);
+    }
+    .login-form { display: none; }
+    .login-form.active { display: block; }
+    .login-field {
+      margin-bottom: 16px;
+    }
+    .login-field label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 6px;
+    }
+    .login-field input {
+      width: 100%;
+      padding: 12px 16px;
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 0.95rem;
+      font-family: var(--font-body);
+      background: var(--surface);
+      color: var(--text);
+      transition: all 0.2s var(--ease-out);
+    }
+    .login-field input:focus {
+      outline: none;
+      border-color: var(--clay);
+      box-shadow: 0 0 0 3px var(--primary-ghost);
+    }
+    .login-error {
+      background: var(--danger-ghost);
+      color: var(--chili);
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      font-size: 0.85rem;
+      margin-bottom: 16px;
+      display: none;
+    }
+    .login-hint {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-align: center;
+      margin-top: 16px;
+    }
+    .login-footer {
+      text-align: center;
+      margin-top: 24px;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="grain-overlay" aria-hidden="true"></div>
+
+  <div class="login-page">
+    <div class="login-card">
+      <div class="login-brand">
+        <span class="brand-mark"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg></span>
+        <h1>知食分子 <span class="brand-en">KnowIngre</span></h1>
+        <p>吃，是一门学问</p>
+      </div>
+
+      <div class="login-tabs">
+        <button class="login-tab active" data-tab="login">登录</button>
+        <button class="login-tab" data-tab="register">注册</button>
+      </div>
+
+      <div class="login-error" id="loginError"></div>
+
+      <form class="login-form active" id="formLogin">
+        <div class="login-field">
+          <label>用户名</label>
+          <input type="text" id="loginUsername" placeholder="输入用户名" required autocomplete="username">
+        </div>
+        <div class="login-field">
+          <label>密码</label>
+          <input type="password" id="loginPassword" placeholder="输入密码" required autocomplete="current-password">
+        </div>
+        <button type="submit" class="btn btn-primary btn-full" style="margin-top:8px">登录</button>
+      </form>
+
+      <form class="login-form" id="formRegister">
+        <div class="login-field">
+          <label>用户名</label>
+          <input type="text" id="regUsername" placeholder="至少2个字符" required minlength="2" autocomplete="username">
+        </div>
+        <div class="login-field">
+          <label>密码</label>
+          <input type="password" id="regPassword" placeholder="至少4个字符" required minlength="4" autocomplete="new-password">
+        </div>
+        <button type="submit" class="btn btn-primary btn-full" style="margin-top:8px">注册</button>
+      </form>
+
+      <p class="login-footer">数据由服务器管理，仅供指定用户使用</p>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = window.location.origin;
+    const formLogin = document.getElementById('formLogin');
+    const formRegister = document.getElementById('formRegister');
+    const errorEl = document.getElementById('loginError');
+
+    // Tab switching
+    document.querySelectorAll('.login-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.login-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        document.querySelectorAll('.login-form').forEach(f => f.classList.remove('active'));
+        document.getElementById(tab.dataset.tab === 'login' ? 'formLogin' : 'formRegister').classList.add('active');
+        errorEl.style.display = 'none';
+      });
+    });
+
+    function showError(msg) {
+      errorEl.textContent = msg;
+      errorEl.style.display = 'block';
+    }
+
+    async function submitAuth(path, username, password) {
+      try {
+        const resp = await fetch(API_BASE + path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: username.trim(), password })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          showError(data.error || '请求失败');
+          return;
+        }
+        localStorage.setItem('knowingre_token', data.token);
+        localStorage.setItem('knowingre_user', JSON.stringify(data.user));
+        window.location.href = '/';
+      } catch (err) {
+        showError('网络错误，请检查服务器是否运行');
+      }
+    }
+
+    formLogin.addEventListener('submit', e => {
+      e.preventDefault();
+      const u = document.getElementById('loginUsername').value;
+      const p = document.getElementById('loginPassword').value;
+      if (!u || !p) { showError('请填写用户名和密码'); return; }
+      submitAuth('/api/auth/login', u, p);
+    });
+
+    formRegister.addEventListener('submit', e => {
+      e.preventDefault();
+      const u = document.getElementById('regUsername').value.trim();
+      const p = document.getElementById('regPassword').value;
+      if (u.length < 2) { showError('用户名至少2个字符'); return; }
+      if (p.length < 4) { showError('密码至少4个字符'); return; }
+      submitAuth('/api/auth/register', u, p);
+    });
+
+    // Auto-redirect if already logged in
+    const existingToken = localStorage.getItem('knowingre_token');
+    if (existingToken) {
+      fetch(API_BASE + '/api/auth/me', {
+        headers: { 'Authorization': 'Bearer ' + existingToken }
+      }).then(r => {
+        if (r.ok) window.location.href = '/';
+        else { localStorage.removeItem('knowingre_token'); localStorage.removeItem('knowingre_user'); }
+      }).catch(() => {});
+    }
+  </script>
+</body>
+</html>

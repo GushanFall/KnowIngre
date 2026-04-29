@@ -1,0 +1,21 @@
+# SQLite database (contains user data, passwords, API keys)
+data.db
+data.db-shm
+data.db-wal
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Dependencies
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
+
+# Design docs
+DESIGN.md

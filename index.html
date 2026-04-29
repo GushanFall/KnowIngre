@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>知食分子 KnowIngre · 吃，是一门学问</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="grain-overlay" aria-hidden="true"></div>
+
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand">
+        <span class="brand-mark"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg></span>
+        <div class="brand-text">
+          <h1>知食分子 <span class="brand-en">KnowIngre</span></h1>
+          <span class="subtitle">吃，是一门学问</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="headerUsername" style="font-size:0.78rem;color:var(--text-muted)"></span>
+        <div class="scope-toggle" id="scopeToggle">
+          <button class="scope-btn active" data-scope="personal"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span> 个人</button>
+          <button class="scope-btn" data-scope="family"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span> 家庭</button>
+        </div>
+        <button class="btn-icon" id="btnLogout" title="退出登录"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></span></button>
+        <button class="btn-icon" id="btnSettings" title="设置">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tab-bar">
+    <div class="tab-bar-inner">
+      <button class="tab active" data-tab="menu">
+        <span class="tab-icon"><svg width="12" height="12" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></span> 今日菜单
+      </button>
+      <button class="tab" data-tab="recipes">
+        <span class="tab-icon"><svg width="12" height="12" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span> 菜谱库
+      </button>
+      <button class="tab" data-tab="inventory">
+        <span class="tab-icon"><svg width="12" height="12" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span> 食材库存
+      </button>
+      <div class="tab-indicator"></div>
+    </div>
+  </nav>
+
+  <main class="content">
+    <!-- 今日菜单 Tab -->
+    <section class="tab-panel active" id="panel-menu">
+      <div class="menu-header">
+        <h2 class="menu-title">
+          <span class="icon icon-md"><svg width="16" height="16" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="0.8" fill="currentColor"/><circle cx="4" cy="12" r="0.8" fill="currentColor"/><circle cx="4" cy="18" r="0.8" fill="currentColor"/></svg></span> 今日菜单
+        </h2>
+        <div class="flex-center gap-8">
+          <span id="menuRecipeCount" class="text-sm text-muted"></span>
+          <button class="btn btn-sm btn-primary" id="btnCookAll" style="display:none"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span> 全部做完</button>
+          <button class="btn btn-sm btn-danger" id="btnClearMenu" style="display:none"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span> 清空</button>
+        </div>
+      </div>
+      <div id="menuContent">
+        <div class="empty-state" id="menuEmpty">
+          <p>还没有添加菜品</p>
+          <button class="btn btn-primary" id="btnGoToRecipes" style="margin-top:16px">去菜谱库添加</button>
+        </div>
+        <div id="menuRecipeList"></div>
+        <div id="menuShoppingList"></div>
+      </div>
+    </section>
+
+    <!-- 菜谱库 Tab -->
+    <section class="tab-panel" id="panel-recipes">
+      <div class="toolbar">
+        <div class="search-wrapper">
+          <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="recipeSearch" placeholder="搜索菜谱..." class="search-input">
+        </div>
+        <button class="btn" id="btnSyncAll" title="同步全部菜谱"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></span> 同步全部</button>
+        <button class="btn btn-primary" id="btnNewRecipe">
+          <span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></span> 新建菜谱
+        </button>
+      </div>
+      <div class="tag-filters" id="tagFilters"></div>
+      <div class="recipe-grid" id="recipeGrid"></div>
+      <div class="empty-state" id="recipeEmpty">
+        <div class="empty-illustration">🍳</div>
+        <p class="empty-title">还没有菜谱</p>
+        <p class="empty-hint">点击「新建菜谱」创建第一份菜谱，支持 AI 快速生成</p>
+      </div>
+    </section>
+
+    <!-- 食材库存 Tab -->
+    <section class="tab-panel" id="panel-inventory">
+      <div class="inventory-layout">
+        <div class="inventory-left">
+          <div class="toolbar">
+            <h3 class="inv-section-title">食材列表</h3>
+            <span class="section-count" id="invCount"></span>
+            <button class="btn btn-primary ml-auto" id="btnAddInventory">+ 添加食材</button>
+          </div>
+          <div class="inventory-list" id="inventoryList"></div>
+        </div>
+        <div class="inventory-right">
+          <div class="section-head">
+            <h3>可制作的菜品</h3>
+          </div>
+          <div class="matchable-recipes" id="matchableRecipes"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="status-bar">
+    <span class="status-dot"></span>
+    <span id="statsText">加载中...</span>
+  </footer>
+
+  <!-- 菜谱详情/编辑弹窗 -->
+  <div class="modal-overlay" id="modalRecipe" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="modalTitle">菜谱详情</h2>
+        <div class="modal-header-actions">
+          <button type="button" class="btn btn-sm btn-primary" id="btnEditRecipe" style="display:none">编辑</button>
+          <button type="button" class="btn btn-sm" id="btnCancelEdit">取消</button>
+          <button type="button" class="btn btn-sm btn-primary" id="btnSave">保存</button>
+          <button class="btn-icon modal-close" id="btnModalClose">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="ai-gen-section" id="aiGenSection" hidden>
+          <div class="ai-panel ai-panel--gen">
+            <span class="ai-panel__spark"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l1.5 5.5L19 9l-5.5 1.5L12 16l-1.5-5.5L5 9l5.5-1.5z"/></svg></span>
+            <input type="text" id="aiGenDishName" placeholder="输入菜名，AI 自动填入..." class="search-input ai-panel__input">
+            <button class="btn btn-primary btn-sm" id="btnAiGenFill">生成</button>
+            <span id="aiGenStatus" class="ai-panel__status"></span>
+          </div>
+        </div>
+        <form id="recipeForm">
+          <input type="hidden" id="rfId">
+
+          <div class="form-group">
+            <label for="rfName">菜名</label>
+            <input type="text" id="rfName" required placeholder="输入菜名">
+          </div>
+
+          <div class="form-group">
+            <label for="rfTags">标签</label>
+            <input type="text" id="rfTags" placeholder="家常, 快手, 川菜">
+            <span class="form-hint">逗号分隔，点击下方预设标签快速添加</span>
+            <div class="tag-suggestions" id="tagSuggestions">
+              <button type="button" class="tag-chip" data-tag="家常">家常</button>
+              <button type="button" class="tag-chip" data-tag="快手">快手</button>
+              <button type="button" class="tag-chip" data-tag="川菜">川菜</button>
+              <button type="button" class="tag-chip" data-tag="粤菜">粤菜</button>
+              <button type="button" class="tag-chip" data-tag="湘菜">湘菜</button>
+              <button type="button" class="tag-chip" data-tag="鲁菜">鲁菜</button>
+              <button type="button" class="tag-chip" data-tag="凉菜">凉菜</button>
+              <button type="button" class="tag-chip" data-tag="汤羹">汤羹</button>
+              <button type="button" class="tag-chip" data-tag="主食">主食</button>
+              <button type="button" class="tag-chip" data-tag="面食">面食</button>
+              <button type="button" class="tag-chip" data-tag="烘焙">烘焙</button>
+              <button type="button" class="tag-chip" data-tag="蒸菜">蒸菜</button>
+              <button type="button" class="tag-chip" data-tag="炖煮">炖煮</button>
+              <button type="button" class="tag-chip" data-tag="煎炸">煎炸</button>
+              <button type="button" class="tag-chip" data-tag="烧烤">烧烤</button>
+              <button type="button" class="tag-chip" data-tag="素食">素食</button>
+              <button type="button" class="tag-chip" data-tag="早餐">早餐</button>
+              <button type="button" class="tag-chip" data-tag="下酒">下酒</button>
+              <button type="button" class="tag-chip" data-tag="宴客">宴客</button>
+              <button type="button" class="tag-chip" data-tag="减脂">减脂</button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>食材清单</label>
+            <div id="rfIngredients"></div>
+            <button type="button" class="btn btn-sm btn-ghost" id="btnAddIngredient">+ 添加食材</button>
+          </div>
+
+          <div class="form-group">
+            <label>制作步骤</label>
+            <div id="rfSteps"></div>
+            <button type="button" class="btn btn-sm btn-ghost" id="btnAddStep">+ 添加步骤</button>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group w-40">
+              <label for="rfSource">来源</label>
+              <select id="rfSource">
+                <option value="manual">手动录入</option>
+                <option value="ai">AI 生成</option>
+              </select>
+            </div>
+            <div class="form-group w-40">
+              <label>评分</label>
+              <div class="star-rating" id="rfRating">
+                <span data-v="1">☆</span><span data-v="2">☆</span><span data-v="3">☆</span><span data-v="4">☆</span><span data-v="5">☆</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="rfNotes">备注</label>
+            <textarea id="rfNotes" rows="3" placeholder="烹饪技巧、注意事项..."></textarea>
+          </div>
+
+          <div class="ai-modify-section" id="aiModifySection">
+            <div class="ai-panel ai-panel--modify">
+              <span class="ai-panel__label"><svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" fill="none" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> AI 修改</span>
+              <input type="text" id="aiModifyInput" placeholder="例如：换成猪肉、减少用油..." class="search-input ai-panel__input text-sm">
+              <button class="btn btn-sm btn-primary" id="btnAiModify">应用</button>
+              <span id="aiModifyStatus" class="ai-panel__status" style="font-size:0.8rem"></span>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <button type="button" class="btn btn-danger" id="btnDeleteRecipe">删除菜谱</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- API 设置弹窗 -->
+  <div class="modal-overlay" id="modalSettings" hidden>
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header">
+        <h2>设置</h2>
+        <button class="btn-icon modal-close" id="btnSettingsClose">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <!-- 设置子 Tab -->
+        <div class="settings-tabs" id="settingsTabs">
+          <button class="settings-tab active" data-stab="api">API</button>
+          <button class="settings-tab" data-stab="password">密码</button>
+          <button class="settings-tab" data-stab="data">数据</button>
+          <button class="settings-tab" data-stab="family">家庭</button>
+          <button class="settings-tab" data-stab="users" id="stabUsers" style="display:none">用户</button>
+        </div>
+
+        <!-- API 面板 -->
+        <div class="settings-panel active" id="spanel-api">
+          <form id="settingsForm" class="settings-form">
+            <div class="form-group">
+              <label for="sfBaseUrl">API Base URL</label>
+              <input type="text" id="sfBaseUrl" placeholder="https://api.deepseek.com/v1">
+            </div>
+            <div class="form-group">
+              <label for="sfApiKey">API Key</label>
+              <input type="password" id="sfApiKey" placeholder="sk-...">
+            </div>
+            <div class="form-group">
+              <label for="sfModel">模型</label>
+              <input type="text" id="sfModel" placeholder="deepseek-v4-flash">
+            </div>
+            <button type="submit" class="btn btn-primary btn-full">保存</button>
+          </form>
+        </div>
+
+        <!-- 密码面板 -->
+        <div class="settings-panel" id="spanel-password">
+          <form id="passwordForm">
+            <div class="form-group">
+              <label for="pwOld">旧密码</label>
+              <input type="password" id="pwOld" required placeholder="输入当前密码">
+            </div>
+            <div class="form-group">
+              <label for="pwNew">新密码</label>
+              <input type="password" id="pwNew" required placeholder="至少4位" minlength="4">
+            </div>
+            <button type="submit" class="btn btn-primary btn-full">修改密码</button>
+          </form>
+          <p id="pwStatus" style="font-size:0.8rem;color:var(--text-muted);margin-top:8px"></p>
+        </div>
+
+        <!-- 数据面板 -->
+        <div class="settings-panel" id="spanel-data">
+          <p style="font-size:0.85rem;color:var(--text-muted);margin-bottom:16px">导出 JSON 备份或从备份恢复数据</p>
+          <div class="flex-col" style="gap:10px">
+            <button type="button" class="btn btn-full" id="btnExportData"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span> 导出数据</button>
+            <button type="button" class="btn btn-full" id="btnImportData"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span> 导入数据</button>
+          </div>
+        </div>
+
+        <!-- 家庭面板 -->
+        <div class="settings-panel" id="spanel-family">
+          <div id="familyNoFamily">
+            <p style="font-size:0.85rem;color:var(--text-muted);margin-bottom:16px">加入家庭后可以和家人共享菜谱和食材</p>
+            <div style="display:flex;flex-direction:column;gap:12px">
+              <button type="button" class="btn btn-primary btn-full" id="btnCreateFamily">＋ 创建家庭</button>
+              <div style="display:flex;gap:8px">
+                <input type="text" id="joinCode" placeholder="输入邀请码" class="search-input" style="flex:1">
+                <button type="button" class="btn btn-primary" id="btnJoinFamily">加入</button>
+              </div>
+            </div>
+            <p id="familyStatus" style="font-size:0.8rem;color:var(--text-muted);margin-top:8px"></p>
+          </div>
+          <div id="familyInfo" style="display:none">
+            <div style="margin-bottom:16px">
+              <p style="font-weight:600;font-size:0.95rem" id="familyName"></p>
+              <p style="font-size:0.8rem;color:var(--text-muted)">邀请码: <code id="familyCode" style="background:var(--stone);padding:2px 8px;border-radius:4px;cursor:pointer"></code> <span style="font-size:0.75rem;color:var(--clay)">点击复制</span></p>
+            </div>
+            <h4 style="font-size:0.8rem;font-weight:600;color:var(--text-muted);margin-bottom:8px">家庭成员</h4>
+            <div id="familyMemberList" style="display:flex;flex-direction:column;gap:4px;margin-bottom:16px"></div>
+            <button type="button" class="btn btn-danger btn-sm" id="btnLeaveFamily">离开家庭</button>
+          </div>
+        </div>
+
+        <!-- 用户管理面板 -->
+        <div class="settings-panel" id="spanel-users">
+          <div id="adminUserList" style="display:flex;flex-direction:column;gap:6px"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 食材编辑弹窗 -->
+  <div class="modal-overlay" id="modalInventory" hidden>
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2 id="invModalTitle">添加食材</h2>
+        <button class="btn-icon modal-close" id="btnInvModalClose">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form id="invForm">
+          <input type="hidden" id="invEditId">
+          <div class="form-group">
+            <label for="invCategory">分类</label>
+            <select id="invCategory">
+              <option value="">选择分类...</option>
+              <option value="蔬菜">蔬菜</option>
+              <option value="肉类">肉类</option>
+              <option value="水产">水产</option>
+              <option value="蛋奶">蛋奶</option>
+              <option value="豆制品">豆制品</option>
+              <option value="熟食">熟食</option>
+              <option value="主食">主食</option>
+              <option value="干货">干货</option>
+              <option value="调料">调料</option>
+              <option value="其他">其他</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="invName">食材名称</label>
+            <input type="text" id="invName" placeholder="例如：鸡胸肉" required>
+          </div>
+          <div class="form-row">
+            <div class="form-group w-40">
+              <label for="invAmount">数量</label>
+              <input type="text" id="invAmount" placeholder="200">
+            </div>
+            <div class="form-group w-40">
+              <label for="invUnit">单位</label>
+              <input type="text" id="invUnit" placeholder="g / 个 / 斤">
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary btn-full">保存</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="toastContainer"></div>
+  <script src="app.js"></script>
+</body>
+</html>
