@@ -777,23 +777,32 @@ body {
 .w-40 { flex: 1; }
 
 /* Inventory List */
-.inventory-list { display: flex; flex-direction: column; gap: 6px; }
+.inventory-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
 .inv-item {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 6px;
   background: var(--surface);
-  padding: 12px 16px;
+  padding: 14px 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   transition: all 0.2s var(--ease-out);
 }
 .inv-item:hover { border-color: var(--border-strong); box-shadow: var(--shadow-xs); }
-.inv-item .inv-info { display: flex; gap: 10px; align-items: baseline; }
-.inv-item .inv-name { font-weight: 600; color: var(--ink); }
+.inv-item .inv-info { display: flex; gap: 8px; align-items: baseline; }
+.inv-item .inv-name { font-weight: 600; color: var(--ink); font-size: 0.95rem; }
 .inv-item .inv-amount { color: var(--text-muted); font-size: 0.82rem; }
+.inv-item .inv-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
 .inv-item .inv-category {
-  font-size: 0.68rem;
+  font-size: 0.65rem;
   font-weight: 600;
   letter-spacing: 0.03em;
   background: var(--indigo-ghost);
@@ -801,6 +810,23 @@ body {
   padding: 2px 10px;
   border-radius: 20px;
 }
+.inv-item .inv-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.inv-item .inv-actions button {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.inv-item .inv-actions .inv-edit-btn { color: var(--clay); }
+.inv-item .inv-actions .inv-edit-btn:hover { background: var(--primary-ghost); }
+.inv-item .inv-actions .inv-del-btn { color: var(--danger); }
+.inv-item .inv-actions .inv-del-btn:hover { background: var(--danger-ghost); }
 
 /* Matchable Recipes */
 .matchable-recipes { display: flex; flex-direction: column; gap: 10px; }
@@ -891,17 +917,6 @@ body {
   font-size: 0.8rem;
   color: var(--chili);
   margin-top: 6px;
-}
-
-/* Category group headers */
-.inventory-list > div > div:first-child {
-  font-size: 0.72rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
-  margin-bottom: 6px;
-  padding-left: 4px;
 }
 
 /* ===== Modal ===== */
@@ -1534,25 +1549,6 @@ body {
   padding: 2px 6px;
 }
 
-/* ===== Inventory Item Action Buttons ===== */
-.inv-item-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-.inv-edit-btn {
-  border: none;
-  background: none;
-  cursor: pointer;
-  color: var(--clay);
-}
-.inv-del-btn {
-  color: var(--danger);
-  border: none;
-  background: none;
-  cursor: pointer;
-}
-
 /* ===== Cook Done Modal Close ===== */
 .done-close-btn {
   border: none;
@@ -1590,8 +1586,6 @@ body {
   .shopping-item { flex-direction: column; align-items: flex-start; gap: 6px; }
   .shopping-item-status { width: 100%; justify-content: flex-end; }
   .match-card { padding: 12px 14px; }
-  .inv-item { flex-direction: column; align-items: flex-start; gap: 6px; }
-  .inv-item-actions { width: 100%; justify-content: flex-end; }
   .login-card { padding: 28px 20px; }
   .ai-panel { flex-wrap: wrap; }
   .ai-panel__input { min-width: 100%; flex-basis: 100%; }
@@ -1627,7 +1621,9 @@ body {
   .modal-body { padding: 12px; }
   .done-item-edit { flex-direction: column; }
   .btn-full { width: 100%; }
+  .inventory-list { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
   .inv-item { padding: 10px 12px; }
+  .inv-item .inv-name { font-size: 0.88rem; }
   .shopping-item { padding: 8px 10px; font-size: 0.82rem; }
   .settings-tabs { gap: 2px; flex-wrap: wrap; border-bottom: none; }
   .settings-tab { font-size: 0.75rem; padding: 6px 10px; margin-bottom: 0; }
@@ -1715,7 +1711,10 @@ body {
   .modal-header-actions { gap: 3px; }
   .modal-header-actions .btn { padding: 4px 8px; font-size: 0.72rem; height: 28px; }
   .settings-tab { font-size: 0.7rem; padding: 5px 8px; }
+  .inventory-list { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
   .inv-item { padding: 8px 10px; }
+  .inv-item .inv-name { font-size: 0.82rem; }
+  .inv-item .inv-category { font-size: 0.6rem; padding: 2px 6px; }
   .shopping-item { padding: 6px 8px; font-size: 0.78rem; }
   .recipe-card .card-footer .btn { font-size: 0.68rem; padding: 3px 8px; height: 28px; }
   .menu-recipe-card { padding: 8px 10px; }

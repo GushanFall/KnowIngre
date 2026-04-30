@@ -1061,29 +1061,19 @@ function renderInventory() {
   if (d.inventory.length === 0) {
     listDiv.innerHTML = '<div class="empty-state" style="padding:30px"><p>🧺 暂无食材，添加一些吧</p></div>';
   } else {
-    // Group by category
-    const grouped = {};
-    d.inventory.forEach(item => {
-      const cat = item.category || '其他';
-      if (!grouped[cat]) grouped[cat] = [];
-      grouped[cat].push(item);
-    });
-    listDiv.innerHTML = Object.entries(grouped).map(([cat, items]) => `
-      <div style="margin-bottom:10px">
-        <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:6px;padding-left:4px">${esc(cat)}</div>
-        ${items.map(item => `
-          <div class="inv-item">
-            <div class="inv-info">
-              <span class="inv-name">${esc(item.name)}</span>
-              <span class="inv-amount">${esc(item.amount)}${item.category !== '调料' && item.unit ? ' ' + esc(item.unit) : ''}</span>
-            </div>
-            <div style="display:flex;gap:8px;align-items:center">
-              <span class="inv-category">${esc(item.category || '其他')}</span>
-              <button class="btn btn-sm" data-inv-edit="${item.id}" style="border:none;background:none;cursor:pointer;color:var(--clay)">编辑</button>
-              <button class="btn btn-sm" data-inv-del="${item.id}" style="color:var(--danger);border:none;background:none;cursor:pointer">删除</button>
-            </div>
-          </div>
-        `).join('')}
+    listDiv.innerHTML = d.inventory.map(item => `
+      <div class="inv-item">
+        <div class="inv-meta">
+          <span class="inv-category">${esc(item.category || '其他')}</span>
+          <span class="inv-actions">
+            <button class="inv-edit-btn" data-inv-edit="${item.id}">编辑</button>
+            <button class="inv-del-btn" data-inv-del="${item.id}">删除</button>
+          </span>
+        </div>
+        <div class="inv-info">
+          <span class="inv-name">${esc(item.name)}</span>
+          <span class="inv-amount">${esc(item.amount)}${item.category !== '调料' && item.unit ? ' ' + esc(item.unit) : ''}</span>
+        </div>
       </div>
     `).join('');
   }
