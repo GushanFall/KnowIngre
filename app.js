@@ -1479,19 +1479,36 @@ function renderMenu() {
   }
   empty.style.display = 'none';
 
-  // Recipe list
-  listDiv.innerHTML = `<div class="menu-recipe-list">${menuRecipes.map(r => `
-    <div class="menu-recipe-card">
-      <div>
-        <div class="menu-recipe-name">${esc(r.name)}</div>
-        <div class="menu-recipe-meta">${r.ingredients.length} 种食材 · ${r.steps.length} 步</div>
-      </div>
-      <div class="menu-card-actions">
-        <button class="btn btn-xs" data-menu-remove="${r.id}" style="color:var(--chili);border:none;background:none;cursor:pointer">${iconSvg('xmark', 'icon-sm')} 移除</button>
-        <button class="btn btn-sm btn-primary" data-menu-cook="${r.id}">${iconSvg('cook', 'icon-sm')} 做完了</button>
-      </div>
-    </div>
-  `).join('')}</div>`;
+  // Recipe cards — same style as recipe grid
+  listDiv.innerHTML = `<div class="menu-recipe-list">${menuRecipes.map(r => {
+    const stars = Array.from({length:5}, (_,i) =>
+      i < r.rating ? `<span class="star">${I.star}</span>` : `<span class="star-empty">${I.starEmpty}</span>`
+    ).join('');
+    const lastCooked = r.cookedDates.length
+      ? r.cookedDates[r.cookedDates.length - 1].slice(0, 10)
+      : '尚未做过';
+    return `
+      <div class="recipe-card in-menu" data-id="${r.id}">
+        <button class="card-menu-badge" data-menu-remove-card="${r.id}" title="点击从今日菜单移除">${iconSvg('menu', 'icon-sm')} 今日菜单 ${iconSvg('xmark', 'icon-sm')}</button>
+        <div class="card-name">${esc(r.name)}</div>
+        <div class="card-tags">${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
+        <div class="card-meta">
+          <span>🥬 ${r.ingredients.length}种食材</span>
+          <span>📝 ${r.steps.length}步</span>
+        </div>
+        <div class="card-meta" style="margin-top:4px">
+          <span>${stars}</span>
+          <span>${lastCooked}</span>
+        </div>
+        <div class="card-footer">
+          <span class="card-hint">点击查看详情 →</span>
+          <div style="display:flex;gap:4px;align-items:center">
+            <button class="btn btn-xs" data-menu-cook="${r.id}" style="border-color:var(--herb);color:var(--herb)">${iconSvg('cook', 'icon-sm')} 做完了</button>
+            <button class="btn btn-xs" data-menu-remove="${r.id}" style="border-color:var(--chili);color:var(--chili)">${iconSvg('xmark', 'icon-sm')} 移除</button>
+          </div>
+        </div>
+      </div>`;
+  }).join('')}</div>`;
 
   // Shopping list — aggregate ingredients across menu, split main vs seasoning
   const neededMain = {};
@@ -1515,49 +1532,42 @@ function renderMenu() {
   if (allItems.length === 0) {
     shopHtml = '<div class="shopping-empty">所有菜谱均无需非可选食材 ✅</div>';
   } else {
-    shopHtml = '<div class="shopping-section"><h3>🛒 食材清单</h3><div class="shopping-list">';
-
-    const renderItem = (item, inStock) => {
+    const renderCard = (item, inStock) => {
       const inv = findInventoryItem(item.name, d.inventory);
-      const stockInfo = inStock && inv ? `${inv.amount} ${inv.unit} 库存中` : '';
+      const recipes = item.recipes.map((r, i) => `${esc(r)} ${esc(item.amounts[i])}`).join(' · ');
+      const stockInfo = (inStock && inv && !isSeasoning(item.name)) ? `库存 ${esc(inv.amount)}${inv.unit ? ' ' + esc(inv.unit) : ''} · ` : '';
       return `<div class="shopping-item ${inStock ? 'have' : 'missing'}">
-        <div>
-          <div class="shopping-item-name">${esc(item.name)}</div>
-          <div class="shopping-item-detail">用于: ${item.recipes.map(esc).join('、')} (需 ${item.amounts.join(' + ')})</div>
-          ${stockInfo ? `<div class="shopping-item-detail" style="color:var(--herb)">✅ ${stockInfo}</div>` : ''}
+        <div class="shopping-item-head">
+          <span class="shopping-item-name">${esc(item.name)}</span>
+          ${inStock
+            ? `<span class="stock-tag stock-tag--have">有库存</span>`
+            : `<span class="stock-tag stock-tag--need" data-quick-add="${esc(item.name)}">待采购</span>`
+          }
         </div>
-        ${inStock
-          ? '<span>✅ 有库存</span>'
-          : `<span style="display:flex;align-items:center;gap:6px"><span style="color:var(--chili)">❌ 缺货</span><button class="btn btn-sm btn-primary" data-quick-add="${esc(item.name)}" style="font-size:0.75rem;padding:2px 6px">+</button></span>`
-        }
+        <div class="shopping-item-detail"><span class="shopping-item-stock-hint">${stockInfo}</span>${recipes}</div>
       </div>`;
     };
 
-    // Main ingredients: in-stock first, then missing
-    const mainHave = mainItems.filter(item => findInventoryItem(item.name, d.inventory));
-    const mainMissing = mainItems.filter(item => !findInventoryItem(item.name, d.inventory));
-    mainHave.forEach(item => { shopHtml += renderItem(item, true); });
-    mainMissing.forEach(item => { shopHtml += renderItem(item, false); });
+    const renderSection = (items, title) => {
+      const sorted = [...items].sort((a, b) => {
+        const aHave = findInventoryItem(a.name, d.inventory) ? 0 : 1;
+        const bHave = findInventoryItem(b.name, d.inventory) ? 0 : 1;
+        return aHave - bHave;
+      });
+      const haveCount = sorted.filter(i => findInventoryItem(i.name, d.inventory)).length;
+      const missingCount = sorted.length - haveCount;
+      const titleTag = title ? `<h3 style="${title === '🧂 调料' ? 'font-size:0.85rem;color:var(--clay);margin-top:16px' : ''}">${title}</h3>` : '';
+      const summary = `<div class="shopping-summary"><span class="stock-tag stock-tag--have">有库存 ${haveCount}</span><span class="stock-tag stock-tag--need">待采购 ${missingCount}</span></div>`;
+      return `${titleTag}${summary}<div class="shopping-list">${sorted.map(i => {
+        const inStock = !!findInventoryItem(i.name, d.inventory);
+        return renderCard(i, inStock);
+      }).join('')}</div>`;
+    };
 
+    shopHtml = '<div class="shopping-section"><h3>🛒 食材清单</h3>';
+    shopHtml += renderSection(mainItems, '');
+    if (seasItems.length) shopHtml += renderSection(seasItems, '🧂 调料');
     shopHtml += '</div>';
-
-    // Seasonings — separate section with lighter treatment
-    if (seasItems.length) {
-      shopHtml += '<div class="shopping-list" style="margin-top:12px"><h3 style="font-size:0.85rem;color:var(--clay)">🧂 调料</h3>';
-      const seasHave = seasItems.filter(item => findInventoryItem(item.name, d.inventory));
-      const seasMissing = seasItems.filter(item => !findInventoryItem(item.name, d.inventory));
-      seasHave.forEach(item => { shopHtml += renderItem(item, true); });
-      seasMissing.forEach(item => { shopHtml += renderItem(item, false); });
-      shopHtml += '</div>';
-    }
-
-    // Summary (main ingredients only)
-    const totalMain = mainItems.reduce((s, i) => s + i.amounts.length, 0);
-    const haveMain = mainHave.reduce((s, i) => s + i.amounts.length, 0);
-    shopHtml += `<div style="margin-top:12px;font-size:0.85rem;color:var(--text-secondary)">
-      主食材满足率: ${mainItems.length === 0 ? '100%' : Math.round(mainHave.length / mainItems.length * 100) + '%'}
-      （${haveMain}/${totalMain} 项有库存，${seasItems.length} 种调料未计入）
-    </div></div>`;
   }
   shopDiv.innerHTML = shopHtml;
 }
@@ -1720,6 +1730,12 @@ async function init() {
       document.getElementById('invName').value = qaBtn.dataset.quickAdd;
       document.getElementById('invAmount').value = '';
       document.getElementById('invUnit').value = '';
+      return;
+    }
+    // Click recipe card to view detail
+    const card = e.target.closest('.recipe-card');
+    if (card && !e.target.closest('button')) {
+      openRecipeModal(card.dataset.id);
       return;
     }
   });

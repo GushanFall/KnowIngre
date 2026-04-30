@@ -1175,20 +1175,7 @@ body {
   flex-wrap:wrap;
   gap:8px;
 }
-.menu-recipe-list { display:flex; flex-direction:column; gap:10px; margin-bottom:24px; }
-.menu-recipe-card {
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  background:var(--surface-card);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  padding:14px 18px;
-  transition:all 0.2s var(--ease-out);
-}
-.menu-recipe-card:hover { border-color:var(--border-strong); box-shadow:var(--shadow-xs); }
-.menu-recipe-name { font-weight:600; font-size:0.95rem; }
-.menu-recipe-meta { font-size:0.78rem; color:var(--text-muted); margin-top:2px; }
+.menu-recipe-list { display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:14px; margin-bottom:24px; }
 
 .shopping-section { margin-top:12px; }
 .shopping-section h3 {
@@ -1197,21 +1184,46 @@ body {
   font-weight:700;
   margin-bottom:12px;
 }
-.shopping-list { display:flex; flex-direction:column; gap:6px; }
+.shopping-summary {
+  display: flex;
+  gap: 16px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.shopping-summary b { color: var(--text); }
+.shopping-list { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:8px; }
 .shopping-item {
   display:flex;
-  align-items:center;
-  justify-content:space-between;
-  padding:10px 14px;
+  flex-direction:column;
+  gap:3px;
+  padding:8px 12px;
   background:var(--surface);
   border:1px solid var(--border);
   border-radius:var(--radius-sm);
-  font-size:0.88rem;
 }
 .shopping-item.missing { border-left:3px solid var(--chili); background:var(--chili-ghost); }
 .shopping-item.have { border-left:3px solid var(--herb); background:var(--herb-ghost); }
-.shopping-item-name { font-weight:500; }
-.shopping-item-detail { font-size:0.8rem; color:var(--text-muted); }
+.shopping-item-head {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:6px;
+}
+.shopping-item-name { font-weight:600; font-size:0.88rem; }
+.stock-tag {
+  font-size:0.68rem;
+  font-weight:500;
+  padding:1px 10px;
+  border-radius:20px;
+  white-space:nowrap;
+  flex-shrink:0;
+}
+.stock-tag--have { background:var(--indigo-ghost); color:var(--indigo); }
+.stock-tag--need { background:var(--gold-ghost); color:var(--gold); cursor:pointer; }
+.stock-tag--need:hover { background:var(--gold); color:#fff; }
+.shopping-item-detail { font-size:0.72rem; color:var(--text-muted); line-height:1.5; }
+.shopping-item-stock-hint { color:var(--indigo); font-weight:500; flex-shrink:0; }
 .shopping-empty { font-size:0.88rem; color:var(--herb); font-weight:500; padding:16px 0; }
 
 /* ===== New Keyframe Animations ===== */
@@ -1531,24 +1543,6 @@ body {
   border-top: 1px solid var(--border);
 }
 
-/* ===== Menu Recipe Card Button Spacing ===== */
-.menu-card-actions {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-/* ===== Shopping Item Status ===== */
-.shopping-item-status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.quick-add-btn {
-  font-size: 0.75rem;
-  padding: 2px 6px;
-}
-
 /* ===== Cook Done Modal Close ===== */
 .done-close-btn {
   border: none;
@@ -1581,11 +1575,10 @@ body {
   .modal-body { padding: 18px; }
   .modal-header h2 { font-size: 1.1rem; }
   .menu-header { flex-direction: row; flex-wrap: wrap; align-items: center; }
-  .menu-recipe-card { flex-direction: column; gap: 10px; }
-  .menu-card-actions { width: 100%; justify-content: flex-end; }
-  .shopping-item { flex-direction: column; align-items: flex-start; gap: 6px; }
-  .shopping-item-status { width: 100%; justify-content: flex-end; }
-  .match-card { padding: 12px 14px; }
+  .menu-recipe-list { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+  .shopping-item-name { font-size: 0.82rem; }
+  .shopping-item-detail { font-size: 0.7rem; }
+  .shopping-list { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
   .login-card { padding: 28px 20px; }
   .ai-panel { flex-wrap: wrap; }
   .ai-panel__input { min-width: 100%; flex-basis: 100%; }
@@ -1624,7 +1617,10 @@ body {
   .inventory-list { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
   .inv-item { padding: 10px 12px; }
   .inv-item .inv-name { font-size: 0.88rem; }
-  .shopping-item { padding: 8px 10px; font-size: 0.82rem; }
+  .shopping-item { padding: 6px 10px; }
+  .shopping-item-name { font-size: 0.78rem; }
+  .stock-tag { font-size:0.62rem; padding:1px 8px; }
+  .shopping-list { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; }
   .settings-tabs { gap: 2px; flex-wrap: wrap; border-bottom: none; }
   .settings-tab { font-size: 0.75rem; padding: 6px 10px; margin-bottom: 0; }
   .toolbar { flex-direction: row; flex-wrap: wrap; gap: 6px; }
@@ -1665,8 +1661,7 @@ body {
   .status-bar { padding: 8px 12px; font-size: 0.72rem; }
   .match-in-menu { font-size: 0.72rem; margin-top: 6px; }
   .shopping-section h3 { font-size: 0.95rem; }
-  .menu-recipe-card { padding: 10px 14px; }
-  .menu-recipe-name { font-size: 0.88rem; }
+  .menu-recipe-list { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
   .section-head h3 { font-size: 1rem; }
   .search-input { font-size: 0.85rem; padding: 9px 12px 9px 36px; }
   .tag-filter { font-size: 0.72rem; padding: 4px 10px; }
@@ -1678,8 +1673,6 @@ body {
   .ai-panel__label { font-size: 0.78rem; }
   .btn-full { font-size: 0.82rem; }
   .form-hint { font-size: 0.68rem; }
-  .menu-card-actions { gap: 4px; }
-  .menu-card-actions .btn { font-size: 0.72rem; padding: 4px 10px; height: 30px; }
 }
 
 /* ===== Responsive — Extra Small Phone ===== */
@@ -1715,10 +1708,13 @@ body {
   .inv-item { padding: 8px 10px; }
   .inv-item .inv-name { font-size: 0.82rem; }
   .inv-item .inv-category { font-size: 0.6rem; padding: 2px 6px; }
-  .shopping-item { padding: 6px 8px; font-size: 0.78rem; }
+  .shopping-item { padding: 5px 8px; }
+  .shopping-item-name { font-size: 0.74rem; }
+  .stock-tag { font-size:0.6rem; padding:1px 6px; }
+  .shopping-item-detail { font-size: 0.65rem; }
+  .shopping-list { grid-template-columns: 1fr; gap: 4px; }
   .recipe-card .card-footer .btn { font-size: 0.68rem; padding: 3px 8px; height: 28px; }
-  .menu-recipe-card { padding: 8px 10px; }
-  .menu-recipe-name { font-size: 0.82rem; }
+  .menu-recipe-list { grid-template-columns: 1fr; gap: 6px; }
   .tag-filter { font-size: 0.68rem; padding: 3px 8px; }
   .tag-filters { gap: 4px; }
   .card-menu-badge { font-size: 0.56rem; padding: 1px 6px; top: 4px; right: 4px; }
