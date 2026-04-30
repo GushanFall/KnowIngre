@@ -37,7 +37,7 @@ async function apiFetch(path, options = {}) {
 
 function getDefaultData() {
   return {
-    settings: { baseUrl: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-v4-flash' },
+    settings: { baseUrl: 'https://api.deepseek.com/v1', hasApiKey: false, model: 'deepseek-v4-flash' },
     recipes: [],
     inventory: [],
     todayMenu: []
@@ -47,23 +47,6 @@ function getDefaultData() {
 function getData() {
   if (!dataCache) dataCache = getDefaultData();
   return dataCache;
-}
-
-async function updateSettings(s) {
-  const d = getData(); d.settings = s;
-  await apiFetch('/api/settings', { method: 'PUT', body: { baseUrl: s.baseUrl, apiKey: s.apiKey, model: s.model } });
-}
-
-async function updateRecipes(r) {
-  getData().recipes = r;
-}
-
-async function updateInventory(i) {
-  getData().inventory = i;
-}
-
-async function updateTodayMenu(m) {
-  getData().todayMenu = m;
 }
 
 // ===== SVG Icons =====
@@ -89,6 +72,24 @@ const I = {
   home: '<svg width="14" height="14" viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>',
 };
 function iconSvg(key, cls) { return `<span class="icon ${cls || ''}">${I[key] || ''}</span>`; }
+
+// ===== Low-stock threshold by unit =====
+const LOW_STOCK_RULES = {
+  small: ['g', 'ml', 'G', 'ML', '克', '毫升'],
+  large: ['kg', 'L', 'l', 'KG', '千克', '升'],
+  count: ['个', '只', '枚', '条', '块', '袋', '盒', '包', '斤', '把', '瓶'],
+};
+function isLowStock(item) {
+  if (!item || item.category === '调料') return false;
+  const n = parseFloat(item.amount);
+  if (isNaN(n)) return false;
+  if (n <= 0) return true;
+  const u = (item.unit || '').trim();
+  if (LOW_STOCK_RULES.small.includes(u)) return n <= 100;
+  if (LOW_STOCK_RULES.large.includes(u)) return n <= 0.2;
+  if (LOW_STOCK_RULES.count.includes(u)) return n <= 1;
+  return false;
+}
 
 // UUID helper
 function uid() {
@@ -118,7 +119,7 @@ async function fetchAllData() {
   // Map server snake_case to frontend camelCase
   const settings = {
     baseUrl: rawSettings.base_url || 'https://api.deepseek.com/v1',
-    apiKey: rawSettings.api_key || '',
+    hasApiKey: !!rawSettings.has_api_key,
     model: rawSettings.model || 'deepseek-v4-flash'
   };
   dataCache = { recipes, inventory, todayMenu: menu, settings };
@@ -132,6 +133,8 @@ let currentFilterTag = null;
 let editingRecipeId = null;
 let editingInventoryId = null;
 let recipeFormDirty = false;
+let invSearchText = '';
+let invFilterCategory = 'all';
 
 // ===== Toast Notifications =====
 function showToast(message, type) {
@@ -208,7 +211,9 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
 document.getElementById('btnSettings').addEventListener('click', async () => {
   const s = getData().settings;
   document.getElementById('sfBaseUrl').value = s.baseUrl || '';
-  document.getElementById('sfApiKey').value = s.apiKey || '';
+  const keyInput = document.getElementById('sfApiKey');
+  keyInput.value = '';
+  keyInput.placeholder = s.hasApiKey ? '已配置，留空保持不变' : 'sk-...';
   document.getElementById('sfModel').value = s.model || '';
   document.getElementById('modalSettings').hidden = false;
   switchSettingsTab('api');
@@ -244,6 +249,8 @@ document.getElementById('btnSettingsClose').addEventListener('click', () => {
 document.getElementById('scopeToggle').addEventListener('click', async (e) => {
   const btn = e.target.closest('.scope-btn');
   if (!btn || btn.classList.contains('active')) return;
+  const toggle = document.getElementById('scopeToggle');
+  if (toggle.dataset.loading === '1') return;
   if (btn.dataset.scope === 'family') {
     try {
       const info = await apiFetch('/api/family');
@@ -253,11 +260,25 @@ document.getElementById('scopeToggle').addEventListener('click', async (e) => {
       }
     } catch { showToast('请先在设置中创建或加入家庭', 'info'); return; }
   }
-  currentScope = btn.dataset.scope;
-  document.querySelectorAll('.scope-btn').forEach(b => b.classList.toggle('active', b.dataset.scope === currentScope));
-  await fetchAllData();
-  renderCurrentTab();
-  updateStats();
+  toggle.dataset.loading = '1';
+  toggle.classList.add('is-loading');
+  try {
+    currentScope = btn.dataset.scope;
+    document.querySelectorAll('.scope-btn').forEach(b => b.classList.toggle('active', b.dataset.scope === currentScope));
+    await fetchAllData();
+    renderCurrentTab();
+    updateStats();
+    const activePanel = document.querySelector('.tab-panel.active');
+    if (activePanel) {
+      activePanel.classList.remove('scope-fade-in');
+      void activePanel.offsetWidth;
+      activePanel.classList.add('scope-fade-in');
+    }
+    showToast(currentScope === 'family' ? '已切换到家庭数据' : '已切换到个人数据', 'success');
+  } finally {
+    toggle.dataset.loading = '0';
+    toggle.classList.remove('is-loading');
+  }
 });
 
 // ===== Family Management =====
@@ -269,9 +290,18 @@ async function loadFamilySettings() {
     if (data.family) {
       document.getElementById('familyName').textContent = data.family.name;
       document.getElementById('familyCode').textContent = data.family.inviteCode;
-      document.getElementById('familyMemberList').innerHTML = data.members.map(m =>
-        `<div style="padding:6px 10px;background:var(--surface);border-radius:var(--radius-sm);font-size:0.88rem">👤 ${esc(m.username)}</div>`
-      ).join('');
+      const me = JSON.parse(localStorage.getItem(USER_KEY) || '{}');
+      document.getElementById('familyMemberList').innerHTML = data.members.map(m => {
+        const initial = (m.username || '?').trim().charAt(0).toUpperCase();
+        const hue = stringHue(m.username);
+        const isMe = m.id === me.id;
+        return `
+          <div class="member-item">
+            <span class="member-avatar" style="background:hsl(${hue}, 60%, 92%); color:hsl(${hue}, 55%, 35%)">${esc(initial)}</span>
+            <span class="member-name">${esc(m.username)}</span>
+            ${isMe ? '<span class="member-tag member-tag--me">我</span>' : ''}
+          </div>`;
+      }).join('');
     }
   } catch { document.getElementById('familyNoFamily').style.display = ''; }
 }
@@ -298,7 +328,7 @@ document.getElementById('btnJoinFamily').addEventListener('click', async () => {
 });
 
 document.getElementById('btnLeaveFamily').addEventListener('click', async () => {
-  if (!confirm('确定离开家庭？')) return;
+  if (!await customConfirm({ title: '离开家庭', message: '离开后将不再共享该家庭的菜谱和库存。你在家庭中创建的内容会保留给其他成员。', confirmText: '离开', type: 'warning' })) return;
   try {
     await apiFetch('/api/family/leave', { method: 'POST' });
     showToast('已离开家庭', 'success');
@@ -320,14 +350,23 @@ document.getElementById('familyCode').addEventListener('click', () => {
 
 document.getElementById('settingsForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const s = {
+  const keyInput = document.getElementById('sfApiKey');
+  const payload = {
     baseUrl: document.getElementById('sfBaseUrl').value.trim(),
-    apiKey: document.getElementById('sfApiKey').value.trim(),
+    apiKey: keyInput.value,  // empty keeps existing; server handles it
     model: document.getElementById('sfModel').value.trim()
   };
-  getData().settings = s;
-  await apiFetch('/api/settings', { method: 'PUT', body: s });
+  await apiFetch('/api/settings', { method: 'PUT', body: payload });
+  const d = getData();
+  d.settings = {
+    baseUrl: payload.baseUrl,
+    model: payload.model || 'deepseek-v4-flash',
+    hasApiKey: d.settings.hasApiKey || payload.apiKey.length > 0
+  };
+  keyInput.value = '';
+  keyInput.placeholder = d.settings.hasApiKey ? '已配置，留空保持不变' : 'sk-...';
   document.getElementById('modalSettings').hidden = true;
+  showToast('设置已保存', 'success');
 });
 
 // Change password
@@ -390,7 +429,7 @@ document.getElementById('btnImportData').addEventListener('click', () => {
         }
         if (!data.settings) data.settings = getDefaultData().settings;
         if (!data.todayMenu || !Array.isArray(data.todayMenu)) data.todayMenu = [];
-        if (!confirm('导入将覆盖当前所有数据，确定继续吗？')) return;
+        if (!await customConfirm({ title: '导入数据', message: '导入将覆盖当前所有菜谱和库存数据。建议先导出当前数据作为备份。', confirmText: '覆盖导入', type: 'danger' })) return;
         try {
           // Upload recipes
           for (const r of data.recipes) {
@@ -421,10 +460,10 @@ document.getElementById('btnImportData').addEventListener('click', () => {
 
 // Close modals on overlay click
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
-  overlay.addEventListener('click', (e) => {
+  overlay.addEventListener('click', async (e) => {
     if (e.target !== overlay) return;
     if (overlay.id === 'modalRecipe' && recipeFormDirty && !recipeViewMode) {
-      if (!confirm('有未保存的修改，确定放弃吗？')) return;
+      if (!await customConfirm({ title: '放弃修改', message: '有未保存的修改，确定放弃吗？', confirmText: '放弃', type: 'warning' })) return;
     }
     recipeFormDirty = false;
     overlay.hidden = true;
@@ -432,6 +471,96 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 });
 
 // ===== Recipe Rendering =====
+function buildInventoryLookup(inventory) {
+  const exact = new Set();
+  const entries = [];
+  for (const inv of inventory) {
+    const norm = normalizeIngredientName(inv.name);
+    exact.add(norm);
+    entries.push(norm);
+  }
+  return (ingName) => {
+    const norm = normalizeIngredientName(ingName);
+    if (exact.has(norm)) return true;
+    for (const invNorm of entries) {
+      const long = invNorm.length >= norm.length ? invNorm : norm;
+      const short = invNorm.length >= norm.length ? norm : invNorm;
+      if (short.length >= 1 && long.endsWith(short) && !isFalseSuffix(long, short)) return true;
+      if (invNorm.length >= 2 && norm.length >= 2) {
+        if (invNorm.includes(norm) || norm.includes(invNorm)) return true;
+      }
+    }
+    return false;
+  };
+}
+
+function countMissingIngredients(ingredients, lookup) {
+  if (!ingredients || !ingredients.length) return 0;
+  return ingredients.filter(i => !i.optional && i.name && !lookup(i.name)).length;
+}
+
+const RECIPE_BATCH = 40;
+let recipeRenderState = { list: [], rendered: 0, observer: null };
+
+function recipeCardHtml(r, ctx) {
+  const inMenu = ctx.todayMenuIds.includes(r.id);
+  const stars = Array.from({length:5}, (_,i) =>
+    i < r.rating ? `<span class="star">${I.star}</span>` : `<span class="star-empty">${I.starEmpty}</span>`
+  ).join('');
+  const cookedCount = r.cookedDates.length;
+  const cookedText = cookedCount
+    ? `做过 ${cookedCount} 次 · ${formatRelativeDate(new Date(r.cookedDates[cookedCount - 1]))}`
+    : '尚未做过';
+  const missing = countMissingIngredients(r.ingredients, ctx.lookup);
+  return `
+    <div class="recipe-card${inMenu ? ' in-menu' : ''}" data-id="${r.id}">
+      ${inMenu ? '<button class="card-menu-badge" data-menu-remove-card="' + r.id + '" title="点击从今日菜单移除">' + iconSvg('menu', 'icon-sm') + ' 今日菜单 ' + iconSvg('xmark', 'icon-sm') + '</button>' : ''}
+      <div class="card-name">${esc(r.name)}</div>
+      <div class="card-tags">${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
+      <div class="card-meta">
+        <span>🥬 ${r.ingredients.length}种食材</span>
+        <span>📝 ${r.steps.length}步</span>
+        ${missing > 0 ? `<span class="card-meta__missing" title="库存中缺少的主食材">缺 ${missing} 样</span>` : '<span class="card-meta__ready" title="主食材齐全">✓ 食材齐</span>'}
+      </div>
+      <div class="card-meta" style="margin-top:4px">
+        <span>${stars}</span>
+        <span>${cookedText}</span>
+      </div>
+      <div class="card-footer">
+        <span class="card-hint">点击查看详情 →</span>
+        <div style="display:flex;gap:4px;align-items:center">
+          <button class="btn btn-xs" data-sync-recipe="${r.id}" title="${ctx.scope === 'family' ? '同步到个人' : '同步到家庭'}" style="border-color:var(--stone-dark);color:var(--text-muted)">${iconSvg('sync', 'icon-sm')}</button>
+          ${inMenu
+            ? `<button class="btn btn-xs" data-menu-remove-card="${r.id}" style="border-color:var(--bloom);color:var(--bloom);background:var(--bloom-ghost)">${iconSvg('menu', 'icon-sm')} 移出</button>`
+            : `<button class="btn btn-xs btn-primary" data-menu-add="${r.id}">${iconSvg('plus', 'icon-sm')} 加入</button>`
+          }
+        </div>
+      </div>
+    </div>`;
+}
+
+function appendRecipeBatch() {
+  const grid = document.getElementById('recipeGrid');
+  const { list, rendered } = recipeRenderState;
+  if (rendered >= list.length) return;
+  const d = getData();
+  const ctx = {
+    todayMenuIds: d.todayMenu || [],
+    lookup: recipeRenderState.lookup || buildInventoryLookup(d.inventory),
+    scope: currentScope,
+  };
+  const next = list.slice(rendered, rendered + RECIPE_BATCH);
+  const sentinel = grid.querySelector('#recipeSentinel');
+  const frag = document.createRange().createContextualFragment(next.map(r => recipeCardHtml(r, ctx)).join(''));
+  if (sentinel) grid.insertBefore(frag, sentinel); else grid.appendChild(frag);
+  recipeRenderState.rendered = rendered + next.length;
+  if (recipeRenderState.rendered >= list.length) {
+    sentinel?.remove();
+    recipeRenderState.observer?.disconnect();
+    recipeRenderState.observer = null;
+  }
+}
+
 function renderRecipes() {
   const d = getData();
   let recipes = d.recipes;
@@ -452,49 +581,33 @@ function renderRecipes() {
   const grid = document.getElementById('recipeGrid');
   const empty = document.getElementById('recipeEmpty');
 
+  // Reset any prior observer
+  recipeRenderState.observer?.disconnect();
+  recipeRenderState = { list: recipes, rendered: 0, observer: null, lookup: buildInventoryLookup(d.inventory) };
+
   if (d.recipes.length === 0) {
     grid.innerHTML = '';
     empty.style.display = 'block';
-  } else if (recipes.length === 0) {
+    return;
+  }
+  if (recipes.length === 0) {
     grid.innerHTML = '<div class="empty-state"><p>🔍 没有匹配的菜谱</p></div>';
     empty.style.display = 'none';
-  } else {
-    empty.style.display = 'none';
-    const todayMenuIds = d.todayMenu || [];
-    grid.innerHTML = recipes.map(r => {
-      const inMenu = todayMenuIds.includes(r.id);
-      const stars = Array.from({length:5}, (_,i) =>
-        i < r.rating ? `<span class="star">${I.star}</span>` : `<span class="star-empty">${I.starEmpty}</span>`
-      ).join('');
-      const lastCooked = r.cookedDates.length
-        ? r.cookedDates[r.cookedDates.length - 1].slice(0, 10)
-        : '尚未做过';
-      return `
-        <div class="recipe-card${inMenu ? ' in-menu' : ''}" data-id="${r.id}">
-          ${inMenu ? '<button class="card-menu-badge" data-menu-remove-card="' + r.id + '" title="点击从今日菜单移除">' + iconSvg('menu', 'icon-sm') + ' 今日菜单 ' + iconSvg('xmark', 'icon-sm') + '</button>' : ''}
-          <div class="card-name">${esc(r.name)}</div>
-          <div class="card-tags">${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
-          <div class="card-meta">
-            <span>🥬 ${r.ingredients.length}种食材</span>
-            <span>📝 ${r.steps.length}步</span>
-          </div>
-          <div class="card-meta" style="margin-top:4px">
-            <span>${stars}</span>
-            <span>${lastCooked}</span>
-          </div>
-          <div class="card-footer">
-            <span class="card-hint">点击查看详情 →</span>
-            <div style="display:flex;gap:4px;align-items:center">
-              <button class="btn btn-xs" data-sync-recipe="${r.id}" title="${currentScope === 'family' ? '同步到个人' : '同步到家庭'}" style="border-color:var(--stone-dark);color:var(--text-muted)">${iconSvg('sync', 'icon-sm')}</button>
-              ${inMenu
-                ? `<button class="btn btn-xs" data-menu-remove-card="${r.id}" style="border-color:var(--bloom);color:var(--bloom);background:var(--bloom-ghost)">${iconSvg('menu', 'icon-sm')} 移出</button>`
-                : `<button class="btn btn-xs btn-primary" data-menu-add="${r.id}">${iconSvg('plus', 'icon-sm')} 加入</button>`
-              }
-            </div>
-          </div>
-        </div>`;
-    }).join('');
+    return;
+  }
 
+  empty.style.display = 'none';
+  grid.innerHTML = recipes.length > RECIPE_BATCH ? '<div id="recipeSentinel" class="recipe-sentinel"></div>' : '';
+  appendRecipeBatch();
+
+  if (recipes.length > RECIPE_BATCH && 'IntersectionObserver' in window) {
+    const sentinel = grid.querySelector('#recipeSentinel');
+    if (sentinel) {
+      recipeRenderState.observer = new IntersectionObserver(entries => {
+        if (entries.some(e => e.isIntersecting)) appendRecipeBatch();
+      }, { rootMargin: '400px 0px' });
+      recipeRenderState.observer.observe(sentinel);
+    }
   }
 }
 
@@ -515,29 +628,166 @@ let recipeViewMode = false;
 
 function setRecipeFormEditable(editable) {
   recipeViewMode = !editable;
+  const form = document.getElementById('recipeForm');
+  const viewer = document.getElementById('rfViewer');
+  form.hidden = !editable;
+  viewer.hidden = editable;
+
   document.getElementById('btnEditRecipe').style.display = editable ? 'none' : '';
-  document.getElementById('btnCancelEdit').style.display = editable ? '' : 'none';
+  document.getElementById('btnCancelEdit').style.display = editable && editingRecipeId ? '' : 'none';
   document.getElementById('btnSave').style.display = editable ? '' : 'none';
   document.getElementById('btnDeleteRecipe').style.display = editingRecipeId && editable ? '' : 'none';
   document.getElementById('aiGenSection').hidden = !editable || !!editingRecipeId;
   document.getElementById('aiModifySection').hidden = !editable;
 
-  document.querySelectorAll('#rfIngredients input, #rfIngredients textarea, #rfSteps textarea, #rfName, #rfTags, #rfNotes, #rfSource').forEach(el => {
-    el.disabled = !editable;
-  });
-  document.querySelectorAll('.row-remove').forEach(el => {
-    el.style.display = editable ? '' : 'none';
-  });
-  document.getElementById('btnAddIngredient').style.display = editable ? '' : 'none';
-  document.getElementById('btnAddStep').style.display = editable ? '' : 'none';
-  // Rating only editable in edit mode
-  document.querySelectorAll('#rfRating span').forEach(s => {
-    s.style.pointerEvents = editable ? '' : 'none';
-    s.style.opacity = editable ? '' : '0.7';
-  });
-
   const title = editingRecipeId ? (editable ? '编辑菜谱' : '菜谱详情') : '新建菜谱';
   document.getElementById('modalTitle').textContent = title;
+}
+
+function renderRecipeViewer(recipe) {
+  const viewer = document.getElementById('rfViewer');
+  if (!recipe) { viewer.innerHTML = ''; return; }
+
+  const tags = (recipe.tags || []).map(t => `<span class="viewer-tag">${esc(t)}</span>`).join('');
+  const stars = '★★★★★'.slice(0, recipe.rating || 0) + '☆☆☆☆☆'.slice(0, 5 - (recipe.rating || 0));
+
+  const ings = (recipe.ingredients || []).map(i => `
+    <li class="viewer-ing${i.optional ? ' viewer-ing--opt' : ''}">
+      <span class="viewer-ing__name">${esc(i.name)}</span>
+      <span class="viewer-ing__amt">${esc(i.amount || '')}</span>
+      ${i.optional ? '<span class="viewer-ing__opt">可选</span>' : ''}
+    </li>
+  `).join('');
+
+  const steps = (recipe.steps || []).filter(s => s && s.trim()).map(s => `
+    <li class="viewer-step">${esc(s)}</li>
+  `).join('');
+
+  const cookedDates = recipe.cookedDates || recipe.cooked_dates || [];
+  const lastCooked = cookedDates.length ? new Date(cookedDates[cookedDates.length - 1]) : null;
+  const lastCookedText = lastCooked ? formatRelativeDate(lastCooked) : '尚未制作';
+
+  viewer.innerHTML = `
+    <div class="viewer-head">
+      <h3 class="viewer-title">${esc(recipe.name)}</h3>
+      ${tags ? `<div class="viewer-tags">${tags}</div>` : ''}
+      <div class="viewer-meta">
+        <span class="viewer-rating" title="评分">${stars}</span>
+        <span class="viewer-stat">🍳 已做 ${cookedDates.length} 次</span>
+        <span class="viewer-stat">⏱ ${lastCookedText}</span>
+      </div>
+    </div>
+    ${ings ? `
+    <section class="viewer-section">
+      <h4 class="viewer-section__title">食材</h4>
+      <ul class="viewer-ings">${ings}</ul>
+    </section>` : ''}
+    ${steps ? `
+    <section class="viewer-section">
+      <h4 class="viewer-section__title">步骤</h4>
+      <ol class="viewer-steps">${steps}</ol>
+    </section>` : ''}
+    ${recipe.notes ? `
+    <section class="viewer-section">
+      <h4 class="viewer-section__title">备注</h4>
+      <p class="viewer-notes">${esc(recipe.notes)}</p>
+    </section>` : ''}
+  `;
+}
+
+async function withLoading(btn, fn) {
+  if (!btn) return fn();
+  const wasDisabled = btn.disabled;
+  btn.disabled = true;
+  btn.classList.add('is-loading');
+  try { return await fn(); }
+  finally {
+    btn.disabled = wasDisabled;
+    btn.classList.remove('is-loading');
+  }
+}
+
+function stringHue(s) {
+  let h = 0;
+  for (let i = 0; i < (s || '').length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h) % 360;
+}
+
+const CONFIRM_ICONS = {
+  danger: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  warning: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+  info: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
+  default: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
+};
+
+function customConfirm({ title = '确认', message = '', details, warning, confirmText = '确定', cancelText = '取消', type = 'default' } = {}) {
+  return new Promise(resolve => {
+    const modal = document.getElementById('modalConfirm');
+    const dialog = modal.querySelector('.confirm-dialog');
+    const titleEl = document.getElementById('confirmTitle');
+    const msgEl = document.getElementById('confirmMessage');
+    const iconEl = document.getElementById('confirmIcon');
+    const detailsEl = document.getElementById('confirmDetails');
+    const warningEl = document.getElementById('confirmWarning');
+    const okBtn = modal.querySelector('[data-confirm-ok]');
+    const cancelBtns = modal.querySelectorAll('[data-confirm-cancel]');
+
+    titleEl.textContent = title;
+    msgEl.textContent = message;
+    msgEl.hidden = !message;
+    dialog.dataset.type = type;
+    iconEl.innerHTML = CONFIRM_ICONS[type] || CONFIRM_ICONS.default;
+
+    if (Array.isArray(details) && details.length) {
+      detailsEl.innerHTML = details.map(d => `<span class="confirm-chip">${esc(d)}</span>`).join('');
+      detailsEl.hidden = false;
+    } else {
+      detailsEl.innerHTML = '';
+      detailsEl.hidden = true;
+    }
+
+    if (warning) {
+      warningEl.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>${esc(warning)}</span>`;
+      warningEl.hidden = false;
+    } else {
+      warningEl.innerHTML = '';
+      warningEl.hidden = true;
+    }
+
+    okBtn.textContent = confirmText;
+    okBtn.className = 'btn ' + (type === 'danger' ? 'btn-danger' : 'btn-primary');
+    cancelBtns.forEach(b => {
+      if (b.tagName === 'BUTTON' && !b.classList.contains('confirm-close')) b.textContent = cancelText;
+    });
+
+    modal.hidden = false;
+
+    const cleanup = (result) => {
+      modal.hidden = true;
+      okBtn.removeEventListener('click', onOk);
+      cancelBtns.forEach(b => b.removeEventListener('click', onCancel));
+      modal.removeEventListener('click', onOverlay);
+      resolve(result);
+    };
+    const onOk = () => cleanup(true);
+    const onCancel = () => cleanup(false);
+    const onOverlay = (e) => { if (e.target === modal) cleanup(false); };
+
+    okBtn.addEventListener('click', onOk);
+    cancelBtns.forEach(b => b.addEventListener('click', onCancel));
+    modal.addEventListener('click', onOverlay);
+  });
+}
+
+function formatRelativeDate(date) {
+  const diffMs = Date.now() - date.getTime();
+  const day = 24 * 60 * 60 * 1000;
+  if (diffMs < day) return '今天做过';
+  const days = Math.floor(diffMs / day);
+  if (days < 30) return `${days} 天前`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months} 个月前`;
+  return `${Math.floor(months / 12)} 年前`;
 }
 
 function openRecipeModal(id) {
@@ -592,26 +842,38 @@ function openRecipeModal(id) {
   `).join('');
 
   bindRemoveButtons();
+  renderRecipeViewer(recipe);
 
   // View mode for existing recipes, edit mode for new ones
   setRecipeFormEditable(isNew);
   document.getElementById('modalRecipe').hidden = false;
+  requestAnimationFrame(autoGrowAllSteps);
 }
 
 document.getElementById('btnEditRecipe').addEventListener('click', () => {
   setRecipeFormEditable(true);
 });
 
-function maybeCloseRecipeModal() {
-  if (recipeFormDirty && !recipeViewMode && !confirm('有未保存的修改，确定放弃吗？')) return;
+async function maybeCloseRecipeModal() {
+  if (recipeFormDirty && !recipeViewMode) {
+    if (!await customConfirm({ title: '放弃修改', message: '有未保存的修改，确定放弃吗？', confirmText: '放弃', type: 'warning' })) return;
+  }
   recipeFormDirty = false;
   document.getElementById('modalRecipe').hidden = true;
 }
 
 document.getElementById('btnModalClose').addEventListener('click', maybeCloseRecipeModal);
 
-// Cancel — close without saving
-document.getElementById('btnCancelEdit').addEventListener('click', maybeCloseRecipeModal);
+// Cancel — for new recipe close; for existing recipe revert to view mode
+document.getElementById('btnCancelEdit').addEventListener('click', async () => {
+  if (!editingRecipeId) { await maybeCloseRecipeModal(); return; }
+  if (recipeFormDirty) {
+    if (!await customConfirm({ title: '放弃修改', message: '有未保存的修改，确定放弃吗？', confirmText: '放弃', type: 'warning' })) return;
+  }
+  const id = editingRecipeId;
+  recipeFormDirty = false;
+  openRecipeModal(id);
+});
 
 // Save button in header
 document.getElementById('btnSave').addEventListener('click', () => {
@@ -672,8 +934,11 @@ document.getElementById('btnAiGenFill').addEventListener('click', async () => {
 
   try {
     const d = getData();
-    if (!d.settings.apiKey) { showToast('请先设置 API Key', 'error'); resetRecipeFormToEmpty(); status.textContent = ''; btn.disabled = false; return; }
-    const recipe = await callLLM(dishName, d.settings);
+    if (!d.settings.hasApiKey) { showToast('请先设置 API Key', 'error'); resetRecipeFormToEmpty(); status.textContent = ''; btn.disabled = false; return; }
+    let started = false;
+    const recipe = await callLLM(dishName, () => {
+      if (!started) { started = true; status.innerHTML = '<span class="ai-spinner"></span> 生成中…'; }
+    });
     // Fill form with staggered reveal
     document.getElementById('rfName').value = recipe.name;
     document.getElementById('rfTags').value = (recipe.tags || []).join(', ');
@@ -699,6 +964,7 @@ document.getElementById('btnAiGenFill').addEventListener('click', async () => {
     `).join('');
     document.getElementById('rfSource').value = 'ai';
     bindRemoveButtons();
+    autoGrowAllSteps();
     recipeFormDirty = true;
     status.innerHTML = '<span class="ai-check">✓</span> 已填入';
   } catch (err) {
@@ -714,6 +980,10 @@ document.getElementById('btnAiModify').addEventListener('click', async () => {
   if (!instruction) { showToast('请输入修改要求', 'error'); return; }
   const current = collectRecipeForm();
   if (!current.name) { showToast('请先填写菜名', 'error'); return; }
+  if (!current.ingredients.length && !current.steps.length) {
+    showToast('请先填写食材或步骤，AI 才能有依据修改', 'error');
+    return;
+  }
   const status = document.getElementById('aiModifyStatus');
   const btn = document.getElementById('btnAiModify');
 
@@ -733,8 +1003,11 @@ document.getElementById('btnAiModify').addEventListener('click', async () => {
 
   try {
     const d = getData();
-    if (!d.settings.apiKey) { showToast('请设置 API Key', 'error'); resetRecipeFormToEmpty(); status.textContent = ''; btn.disabled = false; return; }
-    const updated = await modifyRecipe(current, instruction, d.settings);
+    if (!d.settings.hasApiKey) { showToast('请设置 API Key', 'error'); resetRecipeFormToEmpty(); status.textContent = ''; btn.disabled = false; return; }
+    let startedModify = false;
+    const updated = await modifyRecipe(current, instruction, () => {
+      if (!startedModify) { startedModify = true; status.innerHTML = '<span class="ai-spinner"></span> 修改中…'; }
+    });
     // Fill form with staggered reveal
     document.getElementById('rfName').value = updated.name || current.name;
     document.getElementById('rfTags').value = (updated.tags?.length ? updated.tags : current.tags || []).join(', ');
@@ -760,6 +1033,7 @@ document.getElementById('btnAiModify').addEventListener('click', async () => {
     `).join('');
     document.getElementById('rfSource').value = 'ai';
     bindRemoveButtons();
+    autoGrowAllSteps();
     recipeFormDirty = true;
     status.innerHTML = '<span class="ai-check">✓</span> 已修改';
     document.getElementById('aiModifyInput').value = '';
@@ -839,6 +1113,18 @@ function bindRemoveButtons() {
   });
 }
 
+function autoGrowStep(ta) {
+  if (!ta) return;
+  ta.style.height = 'auto';
+  ta.style.height = ta.scrollHeight + 'px';
+}
+function autoGrowAllSteps() {
+  document.querySelectorAll('#rfSteps [data-step]').forEach(autoGrowStep);
+}
+document.getElementById('rfSteps').addEventListener('input', (e) => {
+  if (e.target.matches('[data-step]')) autoGrowStep(e.target);
+});
+
 function removeIngHandler(e) {
   const rows = document.querySelectorAll('#rfIngredients .ingredient-row');
   if (rows.length > 1) e.target.closest('.ingredient-row').remove();
@@ -899,7 +1185,7 @@ async function saveRecipeFromModal() {
     // Check conflict
     const conflict = d.recipes.find(r => r.name === form.name && r.id !== editingRecipeId);
     if (conflict) {
-      if (!confirm(`「${form.name}」已存在于菜谱库中（另一份菜谱）。\n点击"确定"覆盖现有菜谱，点击"取消"放弃保存。`)) return;
+      if (!await customConfirm({ title: '覆盖同名菜谱', message: `菜谱库中已有另一份「${form.name}」。确定用当前内容覆盖吗？`, confirmText: '覆盖', type: 'warning' })) return;
     }
     try {
       const body = { ...form, cookedDates: (d.recipes.find(r => r.id === editingRecipeId)?.cookedDates || []) };
@@ -910,7 +1196,7 @@ async function saveRecipeFromModal() {
     } catch (err) { showToast('保存失败: ' + err.message, 'error'); return; }
   } else {
     const dup = d.recipes.find(r => r.name === form.name);
-    if (dup && !confirm(`「${form.name}」已存在于菜谱库中。\n点击"确定"覆盖，点击"取消"保留现有。`)) return;
+    if (dup && !await customConfirm({ title: '覆盖同名菜谱', message: `菜谱库中已有「${form.name}」。确定用当前内容覆盖吗？`, confirmText: '覆盖', type: 'warning' })) return;
     try {
       await apiFetch(scoped('/api/recipes'), { method: 'POST', body: { ...form, id: uid() } });
       const recipes = await apiFetch(scoped('/api/recipes'));
@@ -919,8 +1205,13 @@ async function saveRecipeFromModal() {
   }
   showToast(editingRecipeId ? '菜谱已更新' : '菜谱已创建', 'success');
   recipeFormDirty = false;
-  document.getElementById('modalRecipe').hidden = true;
-  editingRecipeId = null;
+  if (editingRecipeId) {
+    // Stay open, switch back to view mode with fresh data
+    openRecipeModal(editingRecipeId);
+  } else {
+    document.getElementById('modalRecipe').hidden = true;
+    editingRecipeId = null;
+  }
   renderRecipes();
 }
 
@@ -936,7 +1227,10 @@ document.getElementById('recipeForm').addEventListener('input', () => {
 
 document.getElementById('btnDeleteRecipe').addEventListener('click', async () => {
   if (!editingRecipeId) return;
-  if (!confirm('确定要删除这份菜谱吗？')) return;
+  const d = getData();
+  const recipe = d.recipes.find(r => r.id === editingRecipeId);
+  const name = recipe?.name || '这份菜谱';
+  if (!await customConfirm({ title: '删除菜谱', message: `确定删除「${name}」？删除后不可恢复。`, confirmText: '删除', type: 'danger' })) return;
   try {
     await apiFetch(scoped(`/api/recipes/${editingRecipeId}`), { method: 'DELETE' });
     const d = getData();
@@ -951,104 +1245,56 @@ document.getElementById('btnDeleteRecipe').addEventListener('click', async () =>
 
 // ===== AI Generate (used in recipe modal) =====
 
-async function callLLM(dishName, settings) {
-  const systemPrompt = `你是一个专业的中餐厨师助手。用户想了解一道菜的做法。
-
-请返回严格的 JSON 格式，不要包含 markdown 代码块标记，只返回纯 JSON：
-
-{
-  "name": "菜名",
-  "ingredients": [{"name": "食材名", "amount": "用量", "optional": false}],
-  "steps": ["步骤1", "步骤2", ...],
-  "tags": ["标签1", "标签2"],
-  "notes": "烹饪技巧或备注"
-}
-
-对于 ingredients 中的 optional 字段，主要食材设为 false，可选/替代食材设为 true。
-标签请从以下列表中优先选择（最多3个）：家常、快手、川菜、粤菜、湘菜、鲁菜、凉菜、汤羹、主食、面食、烘焙、蒸菜、炖煮、煎炸、烧烤、素食、早餐、下酒、宴客、减脂。如果没有合适的，可补充一个自定义标签。`;
-
-  const baseUrl = sanitizeHeader(settings.baseUrl || '');
-  const apiKey = sanitizeHeader(settings.apiKey || '');
-  if (!apiKey) throw new Error('请先在设置中填写 API Key');
-
-  const resp = await fetch(`${baseUrl}/chat/completions`, {
+async function streamAiContent(path, body, onProgress) {
+  const resp = await fetch(API_BASE + path + '?stream=1', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
+      'Authorization': 'Bearer ' + getToken()
     },
-    body: JSON.stringify({
-      model: settings.model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `请告诉我【${dishName}】的做法，包括所需食材和详细步骤。` }
-      ],
-      temperature: 0.7,
-      max_tokens: 4096
-    })
+    body: JSON.stringify(body)
   });
-
+  if (resp.status === 401) { clearToken(); window.location.href = '/login.html'; throw new Error('未登录'); }
   if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`API 请求失败 (${resp.status}): ${errText}`);
+    const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
   }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let full = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === '[DONE]') continue;
+      try {
+        const chunk = JSON.parse(data);
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) {
+          full += delta;
+          onProgress?.(full);
+        }
+      } catch {}
+    }
+  }
+  return full;
+}
 
-  const data = await resp.json();
-  if (!data.choices?.[0]?.message?.content) {
-    throw new Error('API 返回格式异常，未找到有效响应内容');
-  }
-  return safeParseJSON(data.choices[0].message.content);
+async function callLLM(dishName, onProgress) {
+  const content = await streamAiContent('/api/ai/generate-recipe', { dishName }, onProgress);
+  return safeParseJSON(content);
 }
 
 // AI modify — update existing recipe content via LLM
-async function modifyRecipe(recipe, instruction, settings) {
-  const systemPrompt = `你是一个专业的中餐厨师助手。用户会提供一份菜谱和你需要做的修改。
-
-请返回严格的 JSON 格式，不要包含 markdown 代码块标记，只返回纯 JSON：
-
-{
-  "name": "菜名",
-  "ingredients": [{"name": "食材名", "amount": "用量", "optional": false}],
-  "steps": ["步骤1", "步骤2", ...],
-  "tags": ["标签1", "标签2"],
-  "notes": "烹饪技巧或备注"
-}
-
-对于 ingredients 中的 optional 字段，主要食材设为 false，可选/替代食材设为 true。
-标签请从以下列表中优先选择（最多3个）：家常、快手、川菜、粤菜、湘菜、鲁菜、凉菜、汤羹、主食、面食、烘焙、蒸菜、炖煮、煎炸、烧烤、素食、早餐、下酒、宴客、减脂。如果没有合适的，可补充一个自定义标签。
-保持 JSON 结构完整，只做用户要求的修改，其他部分尽量保持原样。`;
-
-  const baseUrl = sanitizeHeader(settings.baseUrl || '');
-  const apiKey = sanitizeHeader(settings.apiKey || '');
-  if (!apiKey) throw new Error('请先在设置中填写 API Key');
-
-  const resp = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: settings.model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `当前菜谱：\n${JSON.stringify(recipe, null, 2)}\n\n请根据以下要求修改：${instruction}` }
-      ],
-      temperature: 0.7,
-      max_tokens: 4096
-    })
-  });
-
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`API 请求失败 (${resp.status}): ${errText}`);
-  }
-
-  const data = await resp.json();
-  if (!data.choices?.[0]?.message?.content) {
-    throw new Error('API 返回格式异常，未找到有效响应内容');
-  }
-  return safeParseJSON(data.choices[0].message.content);
+async function modifyRecipe(recipe, instruction, onProgress) {
+  const content = await streamAiContent('/api/ai/modify-recipe', { recipe, instruction }, onProgress);
+  return safeParseJSON(content);
 }
 
 // ===== Inventory =====
@@ -1056,15 +1302,46 @@ function renderInventory() {
   const d = getData();
   document.getElementById('invCount').textContent = d.inventory.length > 0 ? `${d.inventory.length} 种` : '';
 
-  // Inventory list
+  // Sync UI to memory state (user might have switched tabs)
+  const searchInput = document.getElementById('invSearch');
+  if (searchInput && searchInput.value !== invSearchText) searchInput.value = invSearchText;
+
+  // Render filter chips based on what exists
+  renderInventoryChips(d.inventory);
+
+  // Apply filter + search
+  const q = invSearchText.trim().toLowerCase();
+  const filtered = d.inventory.filter(item => {
+    if (invFilterCategory === 'low') { if (!isLowStock(item)) return false; }
+    else if (invFilterCategory !== 'all' && item.category !== invFilterCategory) return false;
+    if (q && !item.name.toLowerCase().includes(q)) return false;
+    return true;
+  });
+
   const listDiv = document.getElementById('inventoryList');
+  const bannerDiv = document.getElementById('invBanner');
+  const lowItems = invFilterCategory === 'all' && !q ? d.inventory.filter(isLowStock) : [];
+  const currentIds = lowItems.map(i => i.id).sort().join(',');
+  const dismissedIds = sessionStorage.getItem('knowingre_low_dismissed') || '';
+  const bannerHidden = currentIds && currentIds === dismissedIds;
+  bannerDiv.innerHTML = lowItems.length > 0 && !bannerHidden ? `
+    <div class="low-stock-banner" role="status" data-ids="${esc(currentIds)}">
+      <span class="low-stock-banner__label">⚠ 低库存 (${lowItems.length})</span>
+      ${lowItems.map(i => `<button type="button" data-lowstock-name="${i.id}">${esc(i.name)}</button>`).join('')}
+      <button type="button" class="low-stock-banner__close" data-lowstock-dismiss aria-label="收起">×</button>
+    </div>` : '';
+
   if (d.inventory.length === 0) {
     listDiv.innerHTML = '<div class="empty-state" style="padding:30px"><p>🧺 暂无食材，添加一些吧</p></div>';
+  } else if (filtered.length === 0) {
+    listDiv.innerHTML = `<div class="empty-state" style="padding:24px"><p>未找到匹配的食材</p></div>`;
   } else {
-    listDiv.innerHTML = d.inventory.map(item => `
-      <div class="inv-item">
+    const items = filtered.map(item => {
+      const low = isLowStock(item);
+      return `
+      <div class="inv-item${low ? ' inv-item--low' : ''}">
         <div class="inv-meta">
-          <span class="inv-category">${esc(item.category || '其他')}</span>
+          <span class="inv-category">${esc(item.category || '其他')}${low ? '<span class="low-badge">低</span>' : ''}</span>
           <span class="inv-actions">
             <button class="inv-edit-btn" data-inv-edit="${item.id}">编辑</button>
             <button class="inv-del-btn" data-inv-del="${item.id}">删除</button>
@@ -1074,13 +1351,31 @@ function renderInventory() {
           <span class="inv-name">${esc(item.name)}</span>
           <span class="inv-amount">${esc(item.amount)}${item.category !== '调料' && item.unit ? ' ' + esc(item.unit) : ''}</span>
         </div>
-      </div>
-    `).join('');
+      </div>`;
+    }).join('');
+    listDiv.innerHTML = items;
   }
 
   // Matchable recipes
   renderMatchableRecipes();
 
+}
+
+function renderInventoryChips(inventory) {
+  const chipsDiv = document.getElementById('invFilterChips');
+  if (!chipsDiv) return;
+  const counts = {};
+  inventory.forEach(i => { counts[i.category || '其他'] = (counts[i.category || '其他'] || 0) + 1; });
+  const lowCount = inventory.filter(isLowStock).length;
+  const CAT_ORDER = ['蔬菜', '肉类', '水产', '蛋奶', '豆制品', '熟食', '主食', '干货', '调料', '其他'];
+  const chips = [
+    { key: 'all', label: `全部 ${inventory.length}` },
+    ...(lowCount > 0 ? [{ key: 'low', label: `低库存 ${lowCount}`, danger: true }] : []),
+    ...CAT_ORDER.filter(c => counts[c]).map(c => ({ key: c, label: `${c} ${counts[c]}` })),
+  ];
+  chipsDiv.innerHTML = chips.map(c => `
+    <button type="button" class="inv-chip${invFilterCategory === c.key ? ' inv-chip--active' : ''}${c.danger ? ' inv-chip--danger' : ''}" data-inv-filter="${c.key}">${esc(c.label)}</button>
+  `).join('');
 }
 
 // ===== Inventory modal =====
@@ -1159,6 +1454,7 @@ document.getElementById('invForm').addEventListener('submit', async (e) => {
   }
 
   const d = getData();
+  let mergeResult = null;
   try {
     if (editingInventoryId) {
       await apiFetch(scoped(`/api/inventory/${editingInventoryId}`), {
@@ -1166,7 +1462,7 @@ document.getElementById('invForm').addEventListener('submit', async (e) => {
         body: { name, amount: normAmount, unit: normUnit, category }
       });
     } else {
-      await apiFetch(scoped('/api/inventory'), {
+      mergeResult = await apiFetch(scoped('/api/inventory'), {
         method: 'POST',
         body: { name, amount: normAmount, unit: normUnit, category }
       });
@@ -1174,6 +1470,15 @@ document.getElementById('invForm').addEventListener('submit', async (e) => {
     const inventory = await apiFetch(scoped('/api/inventory'));
     d.inventory = inventory;
   } catch (err) { showToast('保存失败: ' + err.message, 'error'); return; }
+
+  if (mergeResult && !editingInventoryId) {
+    const existing = d.inventory.find(i => i.name === name && i.id !== mergeResult.id);
+    if (!mergeResult.merged && existing) {
+      showToast(`已作为新记录保存 (单位不同于已有 ${esc(existing.amount)}${esc(existing.unit || '')})`, 'info');
+    } else if (mergeResult.merged) {
+      showToast('已合并到现有食材', 'success');
+    }
+  }
 
   editingInventoryId = null;
   document.getElementById('modalInventory').hidden = true;
@@ -1235,6 +1540,28 @@ function renderMatchableRecipes() {
       </div>
     `;
   }).join('');
+}
+
+async function quickCook(recipeId) {
+  const d = getData();
+  const recipe = d.recipes.find(r => r.id === recipeId);
+  if (!recipe) return;
+  try {
+    await apiFetch(scoped(`/api/cook/${recipeId}`), { method: 'POST' });
+    const [recipes, inventory, menu] = await Promise.all([
+      apiFetch(scoped('/api/recipes')),
+      apiFetch(scoped('/api/inventory')),
+      apiFetch(scoped('/api/menu'))
+    ]);
+    d.recipes = recipes;
+    d.inventory = inventory;
+    d.todayMenu = menu;
+  } catch (err) {
+    showToast('操作失败: ' + err.message, 'error');
+    return;
+  }
+  showToast(`✓ ${esc(recipe.name)} 已完成，库存已扣减`, 'success');
+  renderCurrentTab();
 }
 
 function showCookDoneDialog(recipeId) {
@@ -1304,7 +1631,14 @@ function showCookDoneDialog(recipeId) {
       </div>
     </div>
   `;
+  const prevFocus = document.activeElement;
   document.body.appendChild(overlay);
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  requestAnimationFrame(() => {
+    const first = overlay.querySelector('button:not([disabled]), input:not([disabled])');
+    if (first) first.focus();
+  });
 
   // Checkbox → disable amount inputs
   overlay.querySelectorAll('.done-remove-check').forEach(cb => {
@@ -1315,7 +1649,10 @@ function showCookDoneDialog(recipeId) {
     });
   });
 
-  const close = () => overlay.remove();
+  const close = () => {
+    overlay.remove();
+    if (prevFocus && document.contains(prevFocus) && typeof prevFocus.focus === 'function') prevFocus.focus();
+  };
   overlay.querySelector('#doneClose').onclick = close;
   overlay.querySelector('#doneCancel').onclick = close;
   overlay.querySelector('#doneConfirm').onclick = async () => {
@@ -1485,7 +1822,7 @@ function renderMenu() {
       i < r.rating ? `<span class="star">${I.star}</span>` : `<span class="star-empty">${I.starEmpty}</span>`
     ).join('');
     const lastCooked = r.cookedDates.length
-      ? r.cookedDates[r.cookedDates.length - 1].slice(0, 10)
+      ? formatRelativeDate(new Date(r.cookedDates[r.cookedDates.length - 1]))
       : '尚未做过';
     return `
       <div class="recipe-card in-menu" data-id="${r.id}">
@@ -1503,7 +1840,10 @@ function renderMenu() {
         <div class="card-footer">
           <span class="card-hint">点击查看详情 →</span>
           <div style="display:flex;gap:4px;align-items:center">
-            <button class="btn btn-xs" data-menu-cook="${r.id}" style="border-color:var(--herb);color:var(--herb)">${iconSvg('cook', 'icon-sm')} 做完了</button>
+            <button class="btn btn-xs" data-menu-cook="${r.id}" style="border-color:var(--herb);color:var(--herb)" title="按菜谱默认用量扣减库存">${iconSvg('cook', 'icon-sm')} 做完了</button>
+            <button class="btn btn-xs" data-menu-cook-adjust="${r.id}" title="精确调整扣减量" style="padding:4px 7px;color:var(--text-muted)">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
             <button class="btn btn-xs" data-menu-remove="${r.id}" style="border-color:var(--chili);color:var(--chili)">${iconSvg('xmark', 'icon-sm')} 移除</button>
           </div>
         </div>
@@ -1564,12 +1904,252 @@ function renderMenu() {
       }).join('')}</div>`;
     };
 
-    shopHtml = '<div class="shopping-section"><h3>🛒 食材清单</h3>';
+    shopHtml = `<div class="shopping-section">
+      <div class="shopping-header">
+        <h3>🛒 食材清单</h3>
+        <div class="shopping-actions">
+          <button class="btn btn-xs" data-shop-copy title="复制为文本"><span class="icon icon-sm"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span> 复制</button>
+          <button class="btn btn-xs" data-shop-image title="保存为图片"><span class="icon icon-sm"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></span> 图片</button>
+        </div>
+      </div>`;
     shopHtml += renderSection(mainItems, '');
     if (seasItems.length) shopHtml += renderSection(seasItems, '🧂 调料');
     shopHtml += '</div>';
   }
   shopDiv.innerHTML = shopHtml;
+}
+
+function buildShoppingPayload() {
+  const d = getData();
+  const menuRecipes = (d.todayMenu || []).map(id => d.recipes.find(r => r.id === id)).filter(Boolean);
+  const neededMain = {};
+  const neededSeas = {};
+  menuRecipes.forEach(r => {
+    r.ingredients.forEach(ing => {
+      if (ing.optional) return;
+      const target = isSeasoning(ing.name) ? neededSeas : neededMain;
+      const key = normalizeIngredientName(ing.name);
+      if (!target[key]) target[key] = { name: ing.name, recipes: [], amounts: [] };
+      target[key].recipes.push(r.name);
+      target[key].amounts.push(ing.amount || '适量');
+    });
+  });
+  const decorate = (item) => ({
+    ...item,
+    inv: findInventoryItem(item.name, d.inventory),
+  });
+  const sortByStock = (a, b) => (a.inv ? 1 : 0) - (b.inv ? 1 : 0); // need first
+  const main = Object.values(neededMain).map(decorate).sort(sortByStock);
+  const seas = Object.values(neededSeas).map(decorate).sort(sortByStock);
+  return { main, seas, menuNames: menuRecipes.map(r => r.name) };
+}
+
+function formatShoppingText() {
+  const { main, seas, menuNames } = buildShoppingPayload();
+  const lines = [];
+  const today = new Date().toISOString().slice(0, 10);
+  lines.push(`🛒 采购清单 · ${today}`);
+  if (menuNames.length) lines.push(`菜单: ${menuNames.join('、')}`);
+  lines.push('');
+
+  const section = (title, items) => {
+    const need = items.filter(i => !i.inv);
+    const have = items.filter(i => i.inv);
+    if (!need.length && !have.length) return;
+    lines.push(title);
+    if (need.length) {
+      lines.push('【待采购】');
+      need.forEach(i => {
+        const amtHint = i.amounts.length > 1 ? ` (${i.amounts.join(' + ')})` : (i.amounts[0] && i.amounts[0] !== '适量' ? ` ${i.amounts[0]}` : '');
+        lines.push(`  · ${i.name}${amtHint}`);
+      });
+    }
+    if (have.length) {
+      lines.push('【已有】');
+      have.forEach(i => {
+        const stock = i.inv.amount + (i.inv.unit ? ' ' + i.inv.unit : '');
+        lines.push(`  · ${i.name} (库存 ${stock})`);
+      });
+    }
+    lines.push('');
+  };
+  section('主料:', main);
+  if (seas.length) section('调料:', seas);
+  return lines.join('\n').trim();
+}
+
+async function copyShoppingAsText() {
+  const text = formatShoppingText();
+  if (!text) { showToast('清单为空', 'info'); return; }
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('已复制到剪贴板', 'success');
+  } catch {
+    // Fallback: create textarea, select, execCommand
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); showToast('已复制到剪贴板', 'success'); }
+    catch { showToast('复制失败，请手动选择文本', 'error'); }
+    ta.remove();
+  }
+}
+
+function exportShoppingAsImage() {
+  const { main, seas, menuNames } = buildShoppingPayload();
+  if (!main.length && !seas.length) { showToast('清单为空', 'info'); return; }
+
+  const W = 520;
+  const PAD = 28;
+  const LINE = 26;
+  const dpr = window.devicePixelRatio || 1;
+
+  // Measure rows first to compute height
+  const sections = [];
+  const pushSection = (title, items) => {
+    const need = items.filter(i => !i.inv);
+    const have = items.filter(i => i.inv);
+    if (!need.length && !have.length) return;
+    sections.push({ type: 'section-title', text: title });
+    if (need.length) {
+      sections.push({ type: 'subhead', text: `待采购 ${need.length}` });
+      need.forEach(i => {
+        const amt = i.amounts.length > 1 ? i.amounts.join(' + ') : (i.amounts[0] && i.amounts[0] !== '适量' ? i.amounts[0] : '');
+        sections.push({ type: 'need', name: i.name, amount: amt });
+      });
+    }
+    if (have.length) {
+      sections.push({ type: 'subhead', text: `已有 ${have.length}`, muted: true });
+      have.forEach(i => {
+        const stock = i.inv.amount + (i.inv.unit ? ' ' + i.inv.unit : '');
+        sections.push({ type: 'have', name: i.name, stock });
+      });
+    }
+  };
+  pushSection('主料', main);
+  if (seas.length) pushSection('调料', seas);
+
+  // Approximate height
+  const headerH = 108 + (menuNames.length ? 22 : 0);
+  const footerH = 40;
+  const rowCount = sections.length;
+  const H = headerH + rowCount * LINE + footerH;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  // Background (warm paper)
+  ctx.fillStyle = '#fdf8f0';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#7a4a2a';
+
+  const SANS = '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+
+  // Header
+  ctx.font = `700 22px ${SANS}`;
+  ctx.fillStyle = '#3d2817';
+  ctx.fillText('🛒 采购清单', PAD, PAD + 22);
+  ctx.font = `400 13px ${SANS}`;
+  ctx.fillStyle = '#8a6f5a';
+  const today = new Date().toISOString().slice(0, 10);
+  ctx.fillText(today, PAD, PAD + 44);
+
+  if (menuNames.length) {
+    ctx.font = `500 13px ${SANS}`;
+    ctx.fillStyle = '#5a3e26';
+    const menuText = '今日菜单: ' + menuNames.join('、');
+    wrapText(ctx, menuText, PAD, PAD + 70, W - PAD * 2, 18);
+  }
+
+  // Divider
+  ctx.strokeStyle = '#d4b896';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(PAD, headerH - 12);
+  ctx.lineTo(W - PAD, headerH - 12);
+  ctx.stroke();
+
+  // Body rows
+  let y = headerH;
+  sections.forEach(s => {
+    if (s.type === 'section-title') {
+      y += 6;
+      ctx.font = `700 15px ${SANS}`;
+      ctx.fillStyle = '#3d2817';
+      ctx.fillText(s.text, PAD, y + 14);
+      y += LINE;
+    } else if (s.type === 'subhead') {
+      ctx.font = `600 12px ${SANS}`;
+      ctx.fillStyle = s.muted ? '#a08870' : '#c2410c';
+      ctx.fillText(s.text, PAD + 8, y + 14);
+      y += LINE;
+    } else if (s.type === 'need') {
+      ctx.fillStyle = '#c2410c';
+      ctx.beginPath(); ctx.arc(PAD + 16, y + 12, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.font = `500 14px ${SANS}`;
+      ctx.fillStyle = '#3d2817';
+      ctx.fillText(s.name, PAD + 28, y + 16);
+      if (s.amount) {
+        ctx.font = `400 12px ${SANS}`;
+        ctx.fillStyle = '#8a6f5a';
+        const nameW = ctx.measureText(s.name).width + 28 + PAD + 8;
+        ctx.fillText(s.amount, nameW, y + 16);
+      }
+      y += LINE;
+    } else if (s.type === 'have') {
+      ctx.fillStyle = '#97a67b';
+      ctx.font = `400 12px ${SANS}`;
+      ctx.fillText('✓', PAD + 12, y + 16);
+      ctx.font = `400 14px ${SANS}`;
+      ctx.fillStyle = '#6b5a47';
+      ctx.fillText(s.name, PAD + 28, y + 16);
+      ctx.font = `400 11px ${SANS}`;
+      ctx.fillStyle = '#a08870';
+      const nameW = ctx.measureText(s.name).width + 28 + PAD + 8;
+      ctx.fillText(`(${s.stock})`, nameW, y + 16);
+      y += LINE;
+    }
+  });
+
+  // Footer
+  ctx.font = `400 11px ${SANS}`;
+  ctx.fillStyle = '#a08870';
+  ctx.fillText('— 知食分子 KnowIngre —', PAD, H - 16);
+
+  // Download
+  canvas.toBlob(blob => {
+    if (!blob) { showToast('生成失败', 'error'); return; }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `采购清单-${today}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast('已保存为图片', 'success');
+  }, 'image/png');
+}
+
+function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+  // Simple char-wrap for mixed Chinese/English
+  let line = '';
+  let curY = y;
+  for (const ch of text) {
+    const testLine = line + ch;
+    const w = ctx.measureText(testLine).width;
+    if (w > maxWidth && line) {
+      ctx.fillText(line, x, curY);
+      line = ch;
+      curY += lineHeight;
+    } else {
+      line = testLine;
+    }
+  }
+  if (line) ctx.fillText(line, x, curY);
 }
 
 // ===== Recipe Sync =====
@@ -1582,16 +2162,18 @@ async function syncRecipe(recipeId) {
   } catch (err) { showToast('同步失败: ' + err.message, 'error'); }
 }
 
-document.getElementById('btnSyncAll').addEventListener('click', async () => {
+document.getElementById('btnSyncAll').addEventListener('click', async (e) => {
   const from = currentScope;
   const to = from === 'personal' ? 'family' : 'personal';
   const label = to === 'family' ? '家庭' : '个人';
-  if (!confirm(`确定将所有菜谱从${from === 'personal' ? '个人' : '家庭'}同步到${label}？已存在的不会重复添加。`)) return;
-  try {
-    const result = await apiFetch('/api/sync-all', { method: 'POST', body: { from, to } });
-    showToast(`同步完成: ${result.synced} 份新增，${result.skipped} 份已跳过`, 'success');
-    if (to === currentScope) { await fetchAllData(); renderCurrentTab(); updateStats(); }
-  } catch (err) { showToast('同步失败: ' + err.message, 'error'); }
+  if (!await customConfirm({ title: '同步全部菜谱', message: `将所有菜谱从${from === 'personal' ? '个人' : '家庭'}复制到${label}。已存在同名菜谱不会重复添加。`, confirmText: '开始同步', type: 'info' })) return;
+  await withLoading(e.currentTarget, async () => {
+    try {
+      const result = await apiFetch('/api/sync-all', { method: 'POST', body: { from, to } });
+      showToast(`同步完成: ${result.synced} 份新增，${result.skipped} 份已跳过`, 'success');
+      if (to === currentScope) { await fetchAllData(); renderCurrentTab(); updateStats(); }
+    } catch (err) { showToast('同步失败: ' + err.message, 'error'); }
+  });
 });
 
 // ===== Init =====
@@ -1628,7 +2210,7 @@ async function init() {
     const syncBtn = e.target.closest('[data-sync-recipe]');
     if (syncBtn) {
       e.stopPropagation();
-      syncRecipe(syncBtn.dataset.syncRecipe);
+      withLoading(syncBtn, () => syncRecipe(syncBtn.dataset.syncRecipe));
       return;
     }
     const card = e.target.closest('.recipe-card');
@@ -1658,16 +2240,43 @@ async function init() {
     if (editBtn) openInventoryModal(editBtn.dataset.invEdit);
   });
 
+  document.getElementById('invBanner').addEventListener('click', (e) => {
+    const lowNameBtn = e.target.closest('[data-lowstock-name]');
+    if (lowNameBtn) { openInventoryModal(lowNameBtn.dataset.lowstockName); return; }
+    const dismissBtn = e.target.closest('[data-lowstock-dismiss]');
+    if (dismissBtn) {
+      const banner = dismissBtn.closest('.low-stock-banner');
+      const ids = banner?.dataset.ids || '';
+      if (ids) sessionStorage.setItem('knowingre_low_dismissed', ids);
+      banner?.remove();
+      return;
+    }
+  });
+
+  // Inventory search + category filter
+  document.getElementById('invSearch').addEventListener('input', (e) => {
+    invSearchText = e.target.value;
+    renderInventory();
+  });
+  document.getElementById('invFilterChips').addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-inv-filter]');
+    if (!chip) return;
+    invFilterCategory = chip.dataset.invFilter;
+    renderInventory();
+  });
+
   document.getElementById('matchableRecipes').addEventListener('click', async (e) => {
     const addBtn = e.target.closest('[data-menu-add]');
     if (addBtn) {
       const id = addBtn.dataset.menuAdd;
       const d = getData();
       if (d.todayMenu.includes(id)) { showToast('已在菜单中', 'info'); return; }
-      await apiFetch(scoped(`/api/menu/${id}`), { method: 'POST' });
-      d.todayMenu.push(id);
-      renderInventory();
-      updateStats();
+      await withLoading(addBtn, async () => {
+        await apiFetch(scoped(`/api/menu/${id}`), { method: 'POST' });
+        d.todayMenu.push(id);
+        renderInventory();
+        updateStats();
+      });
       return;
     }
     const rmBtn = e.target.closest('[data-menu-remove-card]');
@@ -1687,11 +2296,13 @@ async function init() {
       const id = addBtn.dataset.menuAdd;
       const d = getData();
       if (d.todayMenu.includes(id)) { showToast('该菜谱已在今日菜单中', 'info'); return; }
-      await apiFetch(scoped(`/api/menu/${id}`), { method: 'POST' });
-      d.todayMenu.push(id);
-      renderRecipes();
-      if (currentTab === 'menu') renderMenu();
-      updateStats();
+      await withLoading(addBtn, async () => {
+        await apiFetch(scoped(`/api/menu/${id}`), { method: 'POST' });
+        d.todayMenu.push(id);
+        renderRecipes();
+        if (currentTab === 'menu') renderMenu();
+        updateStats();
+      });
       return;
     }
     const rmCardBtn = e.target.closest('[data-menu-remove-card]');
@@ -1709,6 +2320,8 @@ async function init() {
 
   // Menu delegation — remove from menu, mark cooked, quick-add ingredient
   document.getElementById('panel-menu').addEventListener('click', async (e) => {
+    if (e.target.closest('[data-shop-copy]')) { copyShoppingAsText(); return; }
+    if (e.target.closest('[data-shop-image]')) { exportShoppingAsImage(); return; }
     const rmBtn = e.target.closest('[data-menu-remove]');
     if (rmBtn) {
       const d = getData();
@@ -1718,9 +2331,14 @@ async function init() {
       updateStats();
       return;
     }
+    const adjustBtn = e.target.closest('[data-menu-cook-adjust]');
+    if (adjustBtn) {
+      showCookDoneDialog(adjustBtn.dataset.menuCookAdjust);
+      return;
+    }
     const cookBtn = e.target.closest('[data-menu-cook]');
     if (cookBtn) {
-      showCookDoneDialog(cookBtn.dataset.menuCook);
+      await quickCook(cookBtn.dataset.menuCook);
       return;
     }
     const qaBtn = e.target.closest('[data-quick-add]');
@@ -1745,7 +2363,15 @@ async function init() {
     const d = getData();
     const menuRecipes = d.recipes.filter(r => d.todayMenu.includes(r.id));
     if (!menuRecipes.length) return;
-    if (!confirm(`确定全部做完吗？将扣除 ${menuRecipes.length} 道菜的所有食材库存，并清空今日菜单。`)) return;
+    const ok = await customConfirm({
+      title: '全部做完',
+      message: `把这 ${menuRecipes.length} 道菜标记为做完，按菜谱默认用量扣减主食材库存，并清空今日菜单。`,
+      details: menuRecipes.map(r => r.name),
+      warning: '此操作不可撤销',
+      confirmText: '全部做完',
+      type: 'danger',
+    });
+    if (!ok) return;
 
     try {
       for (const recipe of menuRecipes) {
@@ -1768,7 +2394,7 @@ async function init() {
 
   // Clear menu
   document.getElementById('btnClearMenu').addEventListener('click', async () => {
-    if (!confirm('确定清空今日菜单？')) return;
+    if (!await customConfirm({ title: '清空今日菜单', message: '将移除所有已添加的菜品，库存不受影响。', confirmText: '清空', type: 'warning' })) return;
     await apiFetch(scoped('/api/menu'), { method: 'DELETE' });
     getData().todayMenu = [];
     renderMenu();
@@ -1803,6 +2429,45 @@ async function init() {
   } catch {}
 
   window.addEventListener('resize', debounce(updateTabIndicator, 150));
+  setupModalKeyboard();
+}
+
+// Focus management + Esc close for all modal-overlay elements
+function setupModalKeyboard() {
+  const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  const observer = new MutationObserver(muts => {
+    muts.forEach(m => {
+      if (m.attributeName !== 'hidden') return;
+      const el = m.target;
+      if (el.hidden) {
+        const saved = el._savedFocus;
+        if (saved && document.contains(saved) && typeof saved.focus === 'function') saved.focus();
+        el._savedFocus = null;
+      } else {
+        el._savedFocus = document.activeElement;
+        requestAnimationFrame(() => {
+          const first = el.querySelector(FOCUSABLE);
+          if (first) first.focus();
+        });
+      }
+    });
+  });
+  document.querySelectorAll('.modal-overlay').forEach(m => {
+    observer.observe(m, { attributes: true, attributeFilter: ['hidden'] });
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    // Topmost visible modal — last one in DOM order that isn't hidden
+    const visible = [...document.querySelectorAll('.modal-overlay')].filter(m => !m.hidden);
+    const top = visible[visible.length - 1];
+    if (!top) return;
+    e.preventDefault();
+    const closeBtn = top.querySelector('.modal-close, [data-modal-close], [data-confirm-cancel]');
+    if (closeBtn) closeBtn.click();
+    else top.remove(); // Dynamic overlays without named close
+  });
 }
 
 init();

@@ -100,6 +100,14 @@
             <span class="section-count" id="invCount"></span>
             <button class="btn btn-primary ml-auto" id="btnAddInventory">+ 添加食材</button>
           </div>
+          <div class="inv-controls">
+            <div class="search-wrapper">
+              <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+              <input type="text" id="invSearch" placeholder="搜索食材名..." class="search-input">
+            </div>
+            <div class="inv-filter-chips" id="invFilterChips"></div>
+          </div>
+          <div id="invBanner"></div>
           <div class="inventory-list" id="inventoryList"></div>
         </div>
         <div class="inventory-right">
@@ -118,7 +126,7 @@
   </footer>
 
   <!-- 菜谱详情/编辑弹窗 -->
-  <div class="modal-overlay" id="modalRecipe" hidden>
+  <div class="modal-overlay" id="modalRecipe" role="dialog" aria-modal="true" aria-labelledby="modalTitle" hidden>
     <div class="modal">
       <div class="modal-header">
         <h2 id="modalTitle">菜谱详情</h2>
@@ -126,7 +134,7 @@
           <button type="button" class="btn btn-sm btn-primary" id="btnEditRecipe" style="display:none">编辑</button>
           <button type="button" class="btn btn-sm" id="btnCancelEdit">取消</button>
           <button type="button" class="btn btn-sm btn-primary" id="btnSave">保存</button>
-          <button class="btn-icon modal-close" id="btnModalClose">
+          <button class="btn-icon modal-close" id="btnModalClose" aria-label="关闭">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
           </button>
         </div>
@@ -140,6 +148,7 @@
             <span id="aiGenStatus" class="ai-panel__status"></span>
           </div>
         </div>
+        <div class="recipe-viewer" id="rfViewer" hidden></div>
         <form id="recipeForm">
           <input type="hidden" id="rfId">
 
@@ -227,11 +236,11 @@
   </div>
 
   <!-- API 设置弹窗 -->
-  <div class="modal-overlay" id="modalSettings" hidden>
+  <div class="modal-overlay" id="modalSettings" role="dialog" aria-modal="true" aria-label="设置" hidden>
     <div class="modal" style="max-width:480px">
       <div class="modal-header">
         <h2>设置</h2>
-        <button class="btn-icon modal-close" id="btnSettingsClose">
+        <button class="btn-icon modal-close" id="btnSettingsClose" aria-label="关闭">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
         </button>
       </div>
@@ -322,11 +331,11 @@
   </div>
 
   <!-- 食材编辑弹窗 -->
-  <div class="modal-overlay" id="modalInventory" hidden>
+  <div class="modal-overlay" id="modalInventory" role="dialog" aria-modal="true" aria-labelledby="invModalTitle" hidden>
     <div class="modal modal-sm">
       <div class="modal-header">
         <h2 id="invModalTitle">添加食材</h2>
-        <button class="btn-icon modal-close" id="btnInvModalClose">
+        <button class="btn-icon modal-close" id="btnInvModalClose" aria-label="关闭">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
         </button>
       </div>
@@ -365,6 +374,28 @@
           </div>
           <button type="submit" class="btn btn-primary btn-full">保存</button>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 通用确认对话框 -->
+  <div class="modal-overlay" id="modalConfirm" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" hidden>
+    <div class="modal modal-sm confirm-dialog" data-type="default">
+      <button type="button" class="confirm-close" aria-label="关闭" data-confirm-cancel>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+      <div class="confirm-body">
+        <div class="confirm-icon-wrap">
+          <span class="confirm-icon" id="confirmIcon" aria-hidden="true"></span>
+        </div>
+        <h2 id="confirmTitle" class="confirm-title">确认</h2>
+        <p id="confirmMessage" class="confirm-message"></p>
+        <div id="confirmDetails" class="confirm-details" hidden></div>
+        <p id="confirmWarning" class="confirm-warning" hidden></p>
+      </div>
+      <div class="confirm-actions">
+        <button type="button" class="btn btn-ghost" data-confirm-cancel>取消</button>
+        <button type="button" class="btn btn-primary" data-confirm-ok>确定</button>
       </div>
     </div>
   </div>

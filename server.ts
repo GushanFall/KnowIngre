@@ -74,6 +74,51 @@ db.exec(`
   );
 `);
 
+// ===== AI Prompts =====
+const AI_GEN_PROMPT = `你是一个专业的中餐厨师助手。根据用户提供的菜名，生成详细菜谱。
+
+请返回严格的 JSON 格式，不要包含 markdown 代码块标记，只返回纯 JSON：
+
+{
+  "name": "菜名",
+  "ingredients": [{"name": "食材名", "amount": "用量", "optional": false}],
+  "steps": ["步骤1", "步骤2", ...],
+  "tags": ["标签1", "标签2"],
+  "notes": "烹饪技巧或备注"
+}
+
+对于 ingredients 中的 optional 字段，主要食材设为 false，可选/替代食材设为 true。
+标签请从以下列表中优先选择（最多3个）：家常、快手、川菜、粤菜、湘菜、鲁菜、凉菜、汤羹、主食、面食、烘焙、蒸菜、炖煮、煎炸、烧烤、素食、早餐、下酒、宴客、减脂。如果没有合适的，可补充一个自定义标签。`;
+
+const AI_MODIFY_PROMPT = `你是一个专业的中餐厨师助手。用户会提供一份菜谱和你需要做的修改。
+
+请返回严格的 JSON 格式，不要包含 markdown 代码块标记，只返回纯 JSON：
+
+{
+  "name": "菜名",
+  "ingredients": [{"name": "食材名", "amount": "用量", "optional": false}],
+  "steps": ["步骤1", "步骤2", ...],
+  "tags": ["标签1", "标签2"],
+  "notes": "烹饪技巧或备注"
+}
+
+对于 ingredients 中的 optional 字段，主要食材设为 false，可选/替代食材设为 true。
+标签请从以下列表中优先选择（最多3个）：家常、快手、川菜、粤菜、湘菜、鲁菜、凉菜、汤羹、主食、面食、烘焙、蒸菜、炖煮、煎炸、烧烤、素食、早餐、下酒、宴客、减脂。如果没有合适的，可补充一个自定义标签。
+保持 JSON 结构完整，只做用户要求的修改，其他部分尽量保持原样。`;
+
+// ===== AI Rate Limit (per-user, in-memory) =====
+const AI_RATE_WINDOW_MS = 60 * 60 * 1000;
+const AI_RATE_MAX = 30;
+const aiCallLog = new Map<string, number[]>();
+function checkAiRateLimit(userId: string): boolean {
+  const now = Date.now();
+  const log = (aiCallLog.get(userId) || []).filter(t => now - t < AI_RATE_WINDOW_MS);
+  if (log.length >= AI_RATE_MAX) { aiCallLog.set(userId, log); return false; }
+  log.push(now);
+  aiCallLog.set(userId, log);
+  return true;
+}
+
 // ===== JWT =====
 function base64url(str: string): string {
   return btoa(str).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
@@ -366,13 +411,99 @@ async function handle(req: Request): Promise<Response> {
   // Settings
   if (method === "GET" && path === "/api/settings") {
     const row = db.query("SELECT base_url, api_key, model FROM settings WHERE user_id = ?").get(userId) as any;
-    return json(row || { base_url: "https://api.deepseek.com/v1", api_key: "", model: "deepseek-v4-flash" });
+    if (!row) return json({ base_url: "https://api.deepseek.com/v1", has_api_key: false, model: "deepseek-v4-flash" });
+    return json({ base_url: row.base_url, has_api_key: !!row.api_key, model: row.model });
   }
   if (method === "PUT" && path === "/api/settings") {
     const { baseUrl, apiKey, model } = await req.json();
+    const existing = db.query("SELECT api_key FROM settings WHERE user_id = ?").get(userId) as any;
+    // Empty apiKey means "keep existing" so users don't wipe their key by saving other fields.
+    const keyToStore = (typeof apiKey === "string" && apiKey.length > 0) ? apiKey : (existing?.api_key || "");
     db.query("INSERT INTO settings (user_id, base_url, api_key, model) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET base_url=excluded.base_url, api_key=excluded.api_key, model=excluded.model")
-      .run(userId, baseUrl || "", apiKey || "", model || "deepseek-v4-flash");
+      .run(userId, baseUrl || "", keyToStore, model || "deepseek-v4-flash");
     return json({ ok: true });
+  }
+
+  // AI proxy
+  if (method === "POST" && (path === "/api/ai/generate-recipe" || path === "/api/ai/modify-recipe")) {
+    if (!checkAiRateLimit(userId)) return json({ error: "AI 调用频率过高，请稍后再试" }, 429);
+    const cfg = db.query("SELECT base_url, api_key, model FROM settings WHERE user_id = ?").get(userId) as any;
+    if (!cfg?.api_key) return json({ error: "请先在设置中配置 API Key" }, 400);
+
+    const body = await req.json().catch(() => ({}));
+    let userMessage: string;
+    if (path === "/api/ai/generate-recipe") {
+      if (!body.dishName) return json({ error: "请输入菜名" }, 400);
+      userMessage = `请告诉我【${body.dishName}】的做法，包括所需食材和详细步骤。`;
+    } else {
+      if (!body.recipe || !body.instruction) return json({ error: "参数不完整" }, 400);
+      userMessage = `当前菜谱：\n${JSON.stringify(body.recipe, null, 2)}\n\n请根据以下要求修改：${body.instruction}`;
+    }
+    const systemPrompt = path === "/api/ai/generate-recipe" ? AI_GEN_PROMPT : AI_MODIFY_PROMPT;
+    const wantStream = url.searchParams.get("stream") === "1";
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60000);
+    try {
+      const upstream = await fetch(`${cfg.base_url}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.api_key}` },
+        body: JSON.stringify({
+          model: cfg.model || "deepseek-v4-flash",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userMessage },
+          ],
+          temperature: 0.7,
+          max_tokens: 4096,
+          stream: wantStream,
+        }),
+        signal: controller.signal,
+      });
+      if (!upstream.ok) {
+        const txt = await upstream.text();
+        clearTimeout(timer);
+        return json({ error: `AI 服务异常 (${upstream.status}): ${txt.slice(0, 200)}` }, 502);
+      }
+      if (wantStream && upstream.body) {
+        // Pass SSE through; clearTimeout when stream finishes via finally hook inside reader loop
+        const upstreamBody = upstream.body;
+        const stream = new ReadableStream({
+          async start(ctrl) {
+            const reader = upstreamBody.getReader();
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                ctrl.enqueue(value);
+              }
+            } catch (e) {
+              ctrl.error(e);
+            } finally {
+              clearTimeout(timer);
+              ctrl.close();
+            }
+          },
+        });
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            ...corsHeaders(),
+          },
+        });
+      }
+      const data = await upstream.json();
+      const content = data?.choices?.[0]?.message?.content;
+      if (!content) return json({ error: "AI 返回格式异常" }, 502);
+      return json({ content });
+    } catch (err: any) {
+      if (err?.name === "AbortError") return json({ error: "AI 调用超时，请稍后重试" }, 504);
+      return json({ error: `AI 调用失败: ${err?.message || err}` }, 502);
+    } finally {
+      if (!wantStream) clearTimeout(timer);
+    }
   }
 
   // Recipes
@@ -436,20 +567,22 @@ async function handle(req: Request): Promise<Response> {
   }
   if (method === "POST" && path === "/api/inventory") {
     const body = await req.json();
-    // Accumulate if same name exists
-    const existing = db.query(`SELECT id, amount FROM inventory WHERE name = ? AND ${filterCol} = ?`).get(body.name, ownerId) as any;
-    if (existing && body.amount) {
+    // Accumulate if same name AND same unit (including both empty). Different units → keep as separate rows.
+    const existing = db.query(`SELECT id, amount, unit FROM inventory WHERE name = ? AND ${filterCol} = ?`).get(body.name, ownerId) as any;
+    const bodyUnit = (body.unit || "").trim();
+    const existingUnit = (existing?.unit || "").trim();
+    if (existing && body.amount && bodyUnit === existingUnit) {
       const oldNum = parseFloat(existing.amount) || 0;
       const newNum = parseFloat(body.amount) || 0;
       const sum = String(oldNum + newNum);
-      db.query("UPDATE inventory SET amount=?, unit=COALESCE(NULLIF(?, ''), unit), category=?, updated_at=? WHERE id=?")
-        .run(sum, body.unit || "", body.category || "其他", new Date().toISOString(), existing.id);
-      return json({ id: existing.id });
+      db.query("UPDATE inventory SET amount=?, unit=?, category=?, updated_at=? WHERE id=?")
+        .run(sum, bodyUnit, body.category || "其他", new Date().toISOString(), existing.id);
+      return json({ id: existing.id, merged: true });
     }
     const id = body.id || randomUUID();
     db.query(`INSERT INTO inventory (id, user_id, family_id, name, amount, unit, category, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, userId, scope.familyId, body.name, body.amount || "", body.unit || "", body.category || "其他", new Date().toISOString());
-    return json({ id });
+    return json({ id, merged: false });
   }
   if (method === "PUT" && path.startsWith("/api/inventory/")) {
     const id = path.split("/")[3];
