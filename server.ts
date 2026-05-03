@@ -334,27 +334,35 @@ async function handle(req: Request): Promise<Response> {
 
     if (to === "family") {
       if (!userFamily) return json({ error: "你未加入任何家庭" }, 400);
-      const existing = db.query("SELECT id FROM recipes WHERE name = ? AND family_id = ?").get(recipe.name, userFamily.id);
-      if (existing) return json({ error: "家庭中已存在同名菜谱" }, 409);
+      const existing = db.query("SELECT id FROM recipes WHERE name = ? AND family_id = ?").get(recipe.name, userFamily.id) as any;
+      if (existing) {
+        db.query(`UPDATE recipes SET user_id=?, tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, cooked_dates=?, updated_at=? WHERE id=?`)
+          .run(userId, recipe.tags, recipe.ingredients, recipe.steps, recipe.notes, recipe.source, recipe.rating, recipe.cooked_dates, new Date().toISOString(), existing.id);
+        return json({ id: existing.id, updated: true });
+      }
       const newId = randomUUID();
       db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         newId, userId, userFamily.id, recipe.name, recipe.tags, recipe.ingredients, recipe.steps,
         recipe.notes, recipe.source, recipe.rating, recipe.cooked_dates, new Date().toISOString(), new Date().toISOString()
       );
-      return json({ id: newId });
+      return json({ id: newId, updated: false });
     }
     if (to === "personal") {
       if (!userFamily) return json({ error: "你未加入任何家庭" }, 400);
-      const existing = db.query("SELECT id FROM recipes WHERE name = ? AND user_id = ? AND family_id IS NULL").get(recipe.name, userId);
-      if (existing) return json({ error: "个人菜谱中已存在同名菜谱" }, 409);
+      const existing = db.query("SELECT id FROM recipes WHERE name = ? AND user_id = ? AND family_id IS NULL").get(recipe.name, userId) as any;
+      if (existing) {
+        db.query(`UPDATE recipes SET tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, cooked_dates=?, updated_at=? WHERE id=?`)
+          .run(recipe.tags, recipe.ingredients, recipe.steps, recipe.notes, recipe.source, recipe.rating, recipe.cooked_dates, new Date().toISOString(), existing.id);
+        return json({ id: existing.id, updated: true });
+      }
       const newId = randomUUID();
       db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         newId, userId, recipe.name, recipe.tags, recipe.ingredients, recipe.steps,
         recipe.notes, recipe.source, recipe.rating, recipe.cooked_dates, new Date().toISOString(), new Date().toISOString()
       );
-      return json({ id: newId });
+      return json({ id: newId, updated: false });
     }
     return json({ error: "无效的目标范围" }, 400);
   }
@@ -364,34 +372,44 @@ async function handle(req: Request): Promise<Response> {
     if (from === "personal" && to === "family") {
       if (!userFamily) return json({ error: "你未加入任何家庭" }, 400);
       const recipes = db.query("SELECT * FROM recipes WHERE user_id = ? AND family_id IS NULL").all(userId) as any[];
-      let count = 0;
+      let created = 0, updated = 0;
       for (const r of recipes) {
-        const exists = db.query("SELECT id FROM recipes WHERE name = ? AND family_id = ?").get(r.name, userFamily.id);
-        if (exists) continue;
-        db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-          randomUUID(), userId, userFamily.id, r.name, r.tags, r.ingredients, r.steps,
-          r.notes, r.source, r.rating, r.cooked_dates, new Date().toISOString(), new Date().toISOString()
-        );
-        count++;
+        const exists = db.query("SELECT id FROM recipes WHERE name = ? AND family_id = ?").get(r.name, userFamily.id) as any;
+        if (exists) {
+          db.query(`UPDATE recipes SET user_id=?, tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, cooked_dates=?, updated_at=? WHERE id=?`)
+            .run(userId, r.tags, r.ingredients, r.steps, r.notes, r.source, r.rating, r.cooked_dates, new Date().toISOString(), exists.id);
+          updated++;
+        } else {
+          db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            randomUUID(), userId, userFamily.id, r.name, r.tags, r.ingredients, r.steps,
+            r.notes, r.source, r.rating, r.cooked_dates, new Date().toISOString(), new Date().toISOString()
+          );
+          created++;
+        }
       }
-      return json({ synced: count, skipped: recipes.length - count });
+      return json({ synced: created, updated, skipped: 0 });
     }
     if (from === "family" && to === "personal") {
       if (!userFamily) return json({ error: "你未加入任何家庭" }, 400);
       const recipes = db.query("SELECT * FROM recipes WHERE family_id = ?").all(userFamily.id) as any[];
-      let count = 0;
+      let created = 0, updated = 0;
       for (const r of recipes) {
-        const exists = db.query("SELECT id FROM recipes WHERE name = ? AND user_id = ? AND family_id IS NULL").get(r.name, userId);
-        if (exists) continue;
-        db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
-          VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-          randomUUID(), userId, r.name, r.tags, r.ingredients, r.steps,
-          r.notes, r.source, r.rating, r.cooked_dates, new Date().toISOString(), new Date().toISOString()
-        );
-        count++;
+        const exists = db.query("SELECT id FROM recipes WHERE name = ? AND user_id = ? AND family_id IS NULL").get(r.name, userId) as any;
+        if (exists) {
+          db.query(`UPDATE recipes SET tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, cooked_dates=?, updated_at=? WHERE id=?`)
+            .run(r.tags, r.ingredients, r.steps, r.notes, r.source, r.rating, r.cooked_dates, new Date().toISOString(), exists.id);
+          updated++;
+        } else {
+          db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            randomUUID(), userId, r.name, r.tags, r.ingredients, r.steps,
+            r.notes, r.source, r.rating, r.cooked_dates, new Date().toISOString(), new Date().toISOString()
+          );
+          created++;
+        }
       }
-      return json({ synced: count, skipped: recipes.length - count });
+      return json({ synced: created, updated, skipped: 0 });
     }
     return json({ error: "无效的同步方向" }, 400);
   }

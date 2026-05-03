@@ -2157,8 +2157,8 @@ async function syncRecipe(recipeId) {
   const to = currentScope === 'family' ? 'personal' : 'family';
   const label = to === 'family' ? '家庭' : '个人';
   try {
-    await apiFetch(`/api/recipes/${recipeId}/sync`, { method: 'POST', body: { to } });
-    showToast(`已同步到${label}`, 'success');
+    const result = await apiFetch(`/api/recipes/${recipeId}/sync`, { method: 'POST', body: { to } });
+    showToast(result.updated ? `已覆盖${label}中的同名菜谱` : `已同步到${label}`, 'success');
   } catch (err) { showToast('同步失败: ' + err.message, 'error'); }
 }
 
@@ -2166,11 +2166,11 @@ document.getElementById('btnSyncAll').addEventListener('click', async (e) => {
   const from = currentScope;
   const to = from === 'personal' ? 'family' : 'personal';
   const label = to === 'family' ? '家庭' : '个人';
-  if (!await customConfirm({ title: '同步全部菜谱', message: `将所有菜谱从${from === 'personal' ? '个人' : '家庭'}复制到${label}。已存在同名菜谱不会重复添加。`, confirmText: '开始同步', type: 'info' })) return;
+  if (!await customConfirm({ title: '同步全部菜谱', message: `将所有菜谱从${from === 'personal' ? '个人' : '家庭'}同步到${label}。已存在同名菜谱将被覆盖更新。`, confirmText: '开始同步', type: 'info' })) return;
   await withLoading(e.currentTarget, async () => {
     try {
       const result = await apiFetch('/api/sync-all', { method: 'POST', body: { from, to } });
-      showToast(`同步完成: ${result.synced} 份新增，${result.skipped} 份已跳过`, 'success');
+      showToast(`同步完成: ${result.synced} 份新增，${result.updated || 0} 份已覆盖`, 'success');
       if (to === currentScope) { await fetchAllData(); renderCurrentTab(); updateStats(); }
     } catch (err) { showToast('同步失败: ' + err.message, 'error'); }
   });
