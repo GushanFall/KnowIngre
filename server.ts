@@ -1,18 +1,29 @@
 import { Database } from "bun:sqlite";
 import { createHmac, randomUUID } from "node:crypto";
+import {
+  calculateDeduction,
+  formatQuantity,
+  ingredientNamesMatch,
+  normalizeAmountForStorage,
+  normalizeIngredientKey,
+  normalizeUnit,
+  parseQuantity,
+  type UnitConversionRule,
+} from "./unit-conversion";
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-const JWT_SECRET = process.env.JWT_SECRET || randomUUID().replace(/-/g, "");
+const DATABASE_PATH = process.env.KNOWINGRE_DB_PATH || "data.db";
 const TOKEN_EXPIRY = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // ===== Database =====
-const db = new Database("data.db");
+const db = new Database(DATABASE_PATH);
 db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
 
 // Migration: add is_admin and family columns
 try { db.exec("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE recipes ADD COLUMN family_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE inventory ADD COLUMN family_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE inventory ADD COLUMN version INTEGER DEFAULT 1"); } catch {}
 try { db.exec("ALTER TABLE today_menu ADD COLUMN family_id TEXT"); } catch {}
 
 db.exec(`
@@ -46,6 +57,7 @@ db.exec(`
     amount TEXT DEFAULT '',
     unit TEXT DEFAULT '',
     category TEXT DEFAULT '其他',
+    version INTEGER DEFAULT 1,
     updated_at TEXT DEFAULT (datetime('now'))
   );
   CREATE TABLE IF NOT EXISTS today_menu (
@@ -72,7 +84,110 @@ db.exec(`
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     PRIMARY KEY (family_id, user_id)
   );
+  CREATE TABLE IF NOT EXISTS ingredient_unit_conversions (
+    id TEXT PRIMARY KEY,
+    owner_type TEXT NOT NULL CHECK(owner_type IN ('personal', 'family')),
+    owner_id TEXT NOT NULL,
+    ingredient_key TEXT NOT NULL,
+    ingredient_name TEXT NOT NULL,
+    from_unit TEXT NOT NULL,
+    to_unit TEXT NOT NULL,
+    factor REAL NOT NULL CHECK(factor > 0),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(owner_type, owner_id, ingredient_key, from_unit, to_unit)
+  );
+  CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS app_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS cook_history (
+    id TEXT PRIMARY KEY,
+    recipe_id TEXT REFERENCES recipes(id) ON DELETE SET NULL,
+    recipe_name TEXT NOT NULL,
+    user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    family_id TEXT REFERENCES families(id) ON DELETE SET NULL,
+    cooked_at TEXT NOT NULL,
+    servings REAL,
+    notes TEXT DEFAULT '',
+    legacy_key TEXT UNIQUE,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_cook_history_user_date ON cook_history(user_id, cooked_at);
+  CREATE INDEX IF NOT EXISTS idx_cook_history_family_date ON cook_history(family_id, cooked_at);
+  INSERT OR IGNORE INTO schema_migrations (version) VALUES ('2026-07-unit-conversions-v1');
 `);
+
+function migrateLegacyInventoryAmounts() {
+  const version = "2026-07-inventory-unit-cleanup-v1";
+  if (db.query("SELECT version FROM schema_migrations WHERE version=?").get(version)) return;
+  const migrate = db.transaction(() => {
+    const rows = db.query("SELECT id, amount, unit FROM inventory WHERE TRIM(COALESCE(unit, '')) <> ''").all() as any[];
+    for (const row of rows) {
+      const amount = String(row.amount || "").trim();
+      const unit = String(row.unit || "").trim();
+      if (!amount.endsWith(unit)) continue;
+      const numericPart = amount.slice(0, -unit.length).trim();
+      if (!/^\d+(?:\.\d+)?$/.test(numericPart)) continue;
+      db.query("UPDATE inventory SET amount=?, version=COALESCE(version, 1)+1 WHERE id=?").run(numericPart, row.id);
+    }
+    db.query("INSERT INTO schema_migrations (version) VALUES (?)").run(version);
+  });
+  migrate();
+}
+
+function migrateCookHistory() {
+  const version = "2026-07-cook-history-v1";
+  if (db.query("SELECT version FROM schema_migrations WHERE version=?").get(version)) return;
+  const migrate = db.transaction(() => {
+    const recipes = db.query("SELECT id, name, user_id, family_id, cooked_dates FROM recipes").all() as any[];
+    const insert = db.query(`INSERT OR IGNORE INTO cook_history
+      (id, recipe_id, recipe_name, user_id, family_id, cooked_at, legacy_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    for (const recipe of recipes) {
+      let dates: unknown[] = [];
+      try {
+        const parsed = JSON.parse(recipe.cooked_dates || "[]");
+        if (Array.isArray(parsed)) dates = parsed;
+      } catch {}
+      dates.forEach((rawDate, index) => {
+        if (typeof rawDate !== "string" || !rawDate.trim()) return;
+        const cookedAt = rawDate.trim();
+        const familyId = recipe.family_id && db.query("SELECT 1 FROM families WHERE id=?").get(recipe.family_id)
+          ? recipe.family_id
+          : null;
+        const personalUserId = !familyId && recipe.user_id && db.query("SELECT 1 FROM users WHERE id=?").get(recipe.user_id)
+          ? recipe.user_id
+          : null;
+        insert.run(
+          randomUUID(), recipe.id, recipe.name,
+          personalUserId, familyId, cookedAt,
+          `${recipe.id}:${index}:${cookedAt}`,
+        );
+      });
+    }
+    db.query("INSERT INTO schema_migrations (version) VALUES (?)").run(version);
+  });
+  migrate();
+}
+
+function resolveJwtSecret(): string {
+  const configured = String(process.env.JWT_SECRET || "").trim();
+  if (configured) return configured;
+  const existing = db.query("SELECT value FROM app_metadata WHERE key='jwt_secret'").get() as any;
+  if (existing?.value) return existing.value;
+  const generated = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
+  db.query("INSERT INTO app_metadata (key, value) VALUES ('jwt_secret', ?)").run(generated);
+  return generated;
+}
+
+migrateLegacyInventoryAmounts();
+migrateCookHistory();
+const JWT_SECRET = resolveJwtSecret();
 
 // ===== AI Prompts =====
 const AI_GEN_PROMPT = `你是一个专业的中餐厨师助手。根据用户提供的菜名，生成详细菜谱。
@@ -164,6 +279,10 @@ function resolveScope(userId: string, url: URL): { filterCol: string; extraWhere
   return { filterCol: "user_id", extraWhere: " AND family_id IS NULL", ownerId: userId, familyId: null, userId };
 }
 
+function getConversionOwner(scope: { ownerId: string; familyId: string | null }): { type: "personal" | "family"; id: string } {
+  return { type: scope.familyId ? "family" : "personal", id: scope.ownerId };
+}
+
 // ===== CORS =====
 function corsHeaders(): Record<string, string> {
   return {
@@ -179,6 +298,19 @@ function json(obj: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json", ...corsHeaders() },
   });
+}
+
+function ensureArray(value: unknown): any[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
 }
 
 // ===== Request Helpers =====
@@ -215,7 +347,7 @@ function readFile(name: string): string {
 }
 
 // ===== Router =====
-async function handle(req: Request): Promise<Response> {
+export async function handle(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const method = req.method;
   const path = url.pathname;
@@ -327,40 +459,42 @@ async function handle(req: Request): Promise<Response> {
   if (method === "POST" && path.startsWith("/api/recipes/") && path.endsWith("/sync")) {
     const recipeId = path.split("/")[3];
     const { to } = await req.json();
-    // Try personal recipe first, then family recipe
-    let recipe = db.query("SELECT * FROM recipes WHERE id = ? AND family_id IS NULL AND (user_id = ? OR family_id IS NULL)").get(recipeId, userId) as any;
-    if (!recipe) recipe = db.query("SELECT * FROM recipes WHERE id = ? AND family_id IS NOT NULL").get(recipeId) as any;
-    if (!recipe) return json({ error: "菜谱不存在" }, 404);
 
     if (to === "family") {
       if (!userFamily) return json({ error: "你未加入任何家庭" }, 400);
+      const recipe = db.query("SELECT * FROM recipes WHERE id = ? AND user_id = ? AND family_id IS NULL")
+        .get(recipeId, userId) as any;
+      if (!recipe) return json({ error: "个人菜谱不存在或无权访问" }, 404);
       const existing = db.query("SELECT id FROM recipes WHERE name = ? AND family_id = ?").get(recipe.name, userFamily.id) as any;
       if (existing) {
-        db.query(`UPDATE recipes SET user_id=?, tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, cooked_dates=?, updated_at=? WHERE id=?`)
-          .run(userId, recipe.tags, recipe.ingredients, recipe.steps, recipe.notes, recipe.source, recipe.rating, recipe.cooked_dates, new Date().toISOString(), existing.id);
+        db.query(`UPDATE recipes SET user_id=?, tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, updated_at=? WHERE id=?`)
+          .run(userId, recipe.tags, recipe.ingredients, recipe.steps, recipe.notes, recipe.source, recipe.rating, new Date().toISOString(), existing.id);
         return json({ id: existing.id, updated: true });
       }
       const newId = randomUUID();
       db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         newId, userId, userFamily.id, recipe.name, recipe.tags, recipe.ingredients, recipe.steps,
-        recipe.notes, recipe.source, recipe.rating, recipe.cooked_dates, new Date().toISOString(), new Date().toISOString()
+        recipe.notes, recipe.source, recipe.rating, "[]", new Date().toISOString(), new Date().toISOString()
       );
       return json({ id: newId, updated: false });
     }
     if (to === "personal") {
       if (!userFamily) return json({ error: "你未加入任何家庭" }, 400);
+      const recipe = db.query("SELECT * FROM recipes WHERE id = ? AND family_id = ?")
+        .get(recipeId, userFamily.id) as any;
+      if (!recipe) return json({ error: "家庭菜谱不存在或无权访问" }, 404);
       const existing = db.query("SELECT id FROM recipes WHERE name = ? AND user_id = ? AND family_id IS NULL").get(recipe.name, userId) as any;
       if (existing) {
-        db.query(`UPDATE recipes SET tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, cooked_dates=?, updated_at=? WHERE id=?`)
-          .run(recipe.tags, recipe.ingredients, recipe.steps, recipe.notes, recipe.source, recipe.rating, recipe.cooked_dates, new Date().toISOString(), existing.id);
+        db.query(`UPDATE recipes SET tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, updated_at=? WHERE id=?`)
+          .run(recipe.tags, recipe.ingredients, recipe.steps, recipe.notes, recipe.source, recipe.rating, new Date().toISOString(), existing.id);
         return json({ id: existing.id, updated: true });
       }
       const newId = randomUUID();
       db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         newId, userId, recipe.name, recipe.tags, recipe.ingredients, recipe.steps,
-        recipe.notes, recipe.source, recipe.rating, recipe.cooked_dates, new Date().toISOString(), new Date().toISOString()
+        recipe.notes, recipe.source, recipe.rating, "[]", new Date().toISOString(), new Date().toISOString()
       );
       return json({ id: newId, updated: false });
     }
@@ -376,14 +510,14 @@ async function handle(req: Request): Promise<Response> {
       for (const r of recipes) {
         const exists = db.query("SELECT id FROM recipes WHERE name = ? AND family_id = ?").get(r.name, userFamily.id) as any;
         if (exists) {
-          db.query(`UPDATE recipes SET user_id=?, tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, cooked_dates=?, updated_at=? WHERE id=?`)
-            .run(userId, r.tags, r.ingredients, r.steps, r.notes, r.source, r.rating, r.cooked_dates, new Date().toISOString(), exists.id);
+          db.query(`UPDATE recipes SET user_id=?, tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, updated_at=? WHERE id=?`)
+            .run(userId, r.tags, r.ingredients, r.steps, r.notes, r.source, r.rating, new Date().toISOString(), exists.id);
           updated++;
         } else {
           db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
             randomUUID(), userId, userFamily.id, r.name, r.tags, r.ingredients, r.steps,
-            r.notes, r.source, r.rating, r.cooked_dates, new Date().toISOString(), new Date().toISOString()
+            r.notes, r.source, r.rating, "[]", new Date().toISOString(), new Date().toISOString()
           );
           created++;
         }
@@ -397,14 +531,14 @@ async function handle(req: Request): Promise<Response> {
       for (const r of recipes) {
         const exists = db.query("SELECT id FROM recipes WHERE name = ? AND user_id = ? AND family_id IS NULL").get(r.name, userId) as any;
         if (exists) {
-          db.query(`UPDATE recipes SET tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, cooked_dates=?, updated_at=? WHERE id=?`)
-            .run(r.tags, r.ingredients, r.steps, r.notes, r.source, r.rating, r.cooked_dates, new Date().toISOString(), exists.id);
+          db.query(`UPDATE recipes SET tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, updated_at=? WHERE id=?`)
+            .run(r.tags, r.ingredients, r.steps, r.notes, r.source, r.rating, new Date().toISOString(), exists.id);
           updated++;
         } else {
           db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
             VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
             randomUUID(), userId, r.name, r.tags, r.ingredients, r.steps,
-            r.notes, r.source, r.rating, r.cooked_dates, new Date().toISOString(), new Date().toISOString()
+            r.notes, r.source, r.rating, "[]", new Date().toISOString(), new Date().toISOString()
           );
           created++;
         }
@@ -440,6 +574,218 @@ async function handle(req: Request): Promise<Response> {
     db.query("INSERT INTO settings (user_id, base_url, api_key, model) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET base_url=excluded.base_url, api_key=excluded.api_key, model=excluded.model")
       .run(userId, baseUrl || "", keyToStore, model || "deepseek-v4-flash");
     return json({ ok: true });
+  }
+
+  // Per-ingredient conversions bridge otherwise incompatible dimensions,
+  // for example "1个鸡蛋 = 55g". These rules are scoped just like recipes
+  // and inventory so family data does not leak into personal data.
+  if (method === "GET" && path === "/api/unit-conversions") {
+    const conversionOwner = getConversionOwner(scope);
+    const rows = db.query(`SELECT id, ingredient_key, ingredient_name, from_unit, to_unit, factor, updated_at
+      FROM ingredient_unit_conversions
+      WHERE owner_type = ? AND owner_id = ?
+      ORDER BY ingredient_name, updated_at DESC`).all(conversionOwner.type, conversionOwner.id);
+    return json(rows);
+  }
+  if (method === "POST" && path === "/api/unit-conversions") {
+    const body = await req.json().catch(() => ({}));
+    const ingredientName = String(body.ingredientName || body.ingredient_name || "").trim();
+    const ingredientKey = normalizeIngredientKey(ingredientName);
+    const fromUnit = normalizeUnit(String(body.fromUnit || body.from_unit || ""));
+    const toUnit = normalizeUnit(String(body.toUnit || body.to_unit || ""));
+    const factor = Number(body.factor);
+    if (!ingredientKey || !fromUnit || !toUnit || fromUnit === toUnit || !Number.isFinite(factor) || factor <= 0) {
+      return json({ error: "换算规则不完整，请填写有效的食材、单位和换算值" }, 400);
+    }
+    const conversionOwner = getConversionOwner(scope);
+    const existing = db.query(`SELECT id FROM ingredient_unit_conversions
+      WHERE owner_type=? AND owner_id=? AND ingredient_key=? AND from_unit=? AND to_unit=?`)
+      .get(conversionOwner.type, conversionOwner.id, ingredientKey, fromUnit, toUnit) as any;
+    const id = existing?.id || randomUUID();
+    if (existing) {
+      db.query(`UPDATE ingredient_unit_conversions
+        SET ingredient_name=?, factor=?, updated_at=? WHERE id=?`)
+        .run(ingredientName, factor, new Date().toISOString(), id);
+    } else {
+      db.query(`INSERT INTO ingredient_unit_conversions
+        (id, owner_type, owner_id, ingredient_key, ingredient_name, from_unit, to_unit, factor, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, conversionOwner.type, conversionOwner.id, ingredientKey, ingredientName,
+          fromUnit, toUnit, factor, new Date().toISOString());
+    }
+    const row = db.query(`SELECT id, ingredient_key, ingredient_name, from_unit, to_unit, factor, updated_at
+      FROM ingredient_unit_conversions WHERE id=?`).get(id);
+    return json(row);
+  }
+  if (method === "DELETE" && path.startsWith("/api/unit-conversions/")) {
+    const id = path.split("/")[3];
+    const conversionOwner = getConversionOwner(scope);
+    db.query(`DELETE FROM ingredient_unit_conversions WHERE id=? AND owner_type=? AND owner_id=?`)
+      .run(id, conversionOwner.type, conversionOwner.id);
+    return json({ ok: true });
+  }
+
+  // Transactional, non-destructive restore. Matching IDs in the active scope
+  // are updated; new IDs are inserted; unrelated existing data is retained.
+  if (method === "POST" && path === "/api/import") {
+    const body = await req.json().catch(() => ({}));
+    if (!Array.isArray(body.recipes) || !Array.isArray(body.inventory)) {
+      return json({ error: "备份文件缺少有效的 recipes 或 inventory 数组" }, 400);
+    }
+    const conversionOwner = getConversionOwner(scope);
+    const stats = { recipesCreated: 0, recipesUpdated: 0, inventoryCreated: 0, inventoryUpdated: 0, conversions: 0, history: 0, menu: 0 };
+    const recipeIdMap = new Map<string, string>();
+
+    const restore = db.transaction(() => {
+      for (const raw of body.recipes) {
+        const originalId = String(raw.id || randomUUID());
+        let id = originalId;
+        const existing = db.query("SELECT user_id, family_id FROM recipes WHERE id=?").get(id) as any;
+        const belongsToScope = existing && (scope.familyId
+          ? existing.family_id === scope.familyId
+          : existing.user_id === userId && existing.family_id === null);
+        if (existing && !belongsToScope) id = randomUUID();
+        recipeIdMap.set(originalId, id);
+
+        const tags = ensureArray(raw.tags);
+        const ingredients = normalizeRecipeIngredients(ensureArray(raw.ingredients));
+        const steps = ensureArray(raw.steps);
+        const cookedDates = ensureArray(raw.cookedDates ?? raw.cooked_dates);
+        const now = new Date().toISOString();
+        if (belongsToScope) {
+          db.query(`UPDATE recipes SET user_id=?, family_id=?, name=?, tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, cooked_dates=?, updated_at=? WHERE id=?`)
+            .run(userId, scope.familyId, raw.name || "未命名菜谱", JSON.stringify(tags), JSON.stringify(ingredients),
+              JSON.stringify(steps), raw.notes || "", raw.source || "manual", Number(raw.rating) || 0,
+              JSON.stringify(cookedDates), now, id);
+          stats.recipesUpdated++;
+        } else {
+          db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(id, userId, scope.familyId, raw.name || "未命名菜谱", JSON.stringify(tags), JSON.stringify(ingredients),
+              JSON.stringify(steps), raw.notes || "", raw.source || "manual", Number(raw.rating) || 0,
+              JSON.stringify(cookedDates), raw.created_at || now, now);
+          stats.recipesCreated++;
+        }
+      }
+
+      const importedHistory = ensureArray(body.history);
+      if (importedHistory.length) {
+        for (const raw of importedHistory) {
+          const originalRecipeId = raw.recipeId ?? raw.recipe_id;
+          const recipeId = originalRecipeId ? (recipeIdMap.get(String(originalRecipeId)) || String(originalRecipeId)) : null;
+          const recipe = recipeId
+            ? db.query(`SELECT id, name FROM recipes WHERE id=? AND ${filterCol}=?${extraWhere}`).get(recipeId, ownerId) as any
+            : null;
+          const cookedAt = String(raw.cookedAt ?? raw.cooked_at ?? "").trim();
+          const recipeName = String(raw.recipeName ?? raw.recipe_name ?? recipe?.name ?? "已删除的菜谱").trim();
+          if (!cookedAt || !recipeName) continue;
+          let historyUserId: string | null = scope.familyId ? null : userId;
+          const sourceUserId = String(raw.userId ?? raw.user_id ?? "").trim();
+          if (scope.familyId && sourceUserId) {
+            const isMember = db.query("SELECT 1 FROM family_members WHERE family_id=? AND user_id=?")
+              .get(scope.familyId, sourceUserId);
+            if (isMember) historyUserId = sourceUserId;
+          }
+          const sourceId = String(raw.id || `${originalRecipeId || "deleted"}:${cookedAt}`);
+          const result = db.query(`INSERT OR IGNORE INTO cook_history
+            (id, recipe_id, recipe_name, user_id, family_id, cooked_at, servings, notes, legacy_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+              randomUUID(), recipe?.id || null, recipeName, historyUserId, scope.familyId, cookedAt,
+              Number.isFinite(Number(raw.servings)) ? Number(raw.servings) : null,
+              String(raw.notes || ""), `import:${scope.ownerId}:${sourceId}`,
+            );
+          if (result.changes) stats.history++;
+        }
+      } else {
+        // Old backups only contain recipes.cookedDates. Preserve every timestamp
+        // without rewriting or deleting the legacy field.
+        for (const raw of body.recipes) {
+          const originalRecipeId = String(raw.id || "");
+          const recipeId = recipeIdMap.get(originalRecipeId);
+          if (!recipeId) continue;
+          const dates = ensureArray(raw.cookedDates ?? raw.cooked_dates);
+          dates.forEach((rawDate, index) => {
+            if (typeof rawDate !== "string" || !rawDate.trim()) return;
+            const result = db.query(`INSERT OR IGNORE INTO cook_history
+              (id, recipe_id, recipe_name, user_id, family_id, cooked_at, legacy_key)
+              VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+                randomUUID(), recipeId, String(raw.name || "未命名菜谱"), scope.familyId ? null : userId,
+                scope.familyId, rawDate.trim(), `import-legacy:${scope.ownerId}:${originalRecipeId}:${index}:${rawDate.trim()}`,
+              );
+            if (result.changes) stats.history++;
+          });
+        }
+      }
+
+      for (const raw of body.inventory) {
+        let id = String(raw.id || randomUUID());
+        const existing = db.query("SELECT user_id, family_id FROM inventory WHERE id=?").get(id) as any;
+        const belongsToScope = existing && (scope.familyId
+          ? existing.family_id === scope.familyId
+          : existing.user_id === userId && existing.family_id === null);
+        if (existing && !belongsToScope) id = randomUUID();
+        const unit = String(raw.unit || "").trim();
+        const amount = normalizeAmountForStorage(raw.amount || "", unit);
+        const now = new Date().toISOString();
+        if (belongsToScope) {
+          db.query(`UPDATE inventory SET user_id=?, family_id=?, name=?, amount=?, unit=?, category=?, version=COALESCE(version, 1)+1, updated_at=? WHERE id=?`)
+            .run(userId, scope.familyId, raw.name || "未命名食材", amount, unit, raw.category || "其他", now, id);
+          stats.inventoryUpdated++;
+        } else {
+          db.query(`INSERT INTO inventory (id, user_id, family_id, name, amount, unit, category, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(id, userId, scope.familyId, raw.name || "未命名食材", amount, unit, raw.category || "其他", now);
+          stats.inventoryCreated++;
+        }
+      }
+
+      for (const raw of ensureArray(body.unitConversions)) {
+        const ingredientName = String(raw.ingredient_name || raw.ingredientName || "").trim();
+        const ingredientKey = normalizeIngredientKey(ingredientName);
+        const fromUnit = normalizeUnit(String(raw.from_unit || raw.fromUnit || ""));
+        const toUnit = normalizeUnit(String(raw.to_unit || raw.toUnit || ""));
+        const factor = Number(raw.factor);
+        if (!ingredientKey || !fromUnit || !toUnit || fromUnit === toUnit || !Number.isFinite(factor) || factor <= 0) continue;
+        const existing = db.query(`SELECT id FROM ingredient_unit_conversions
+          WHERE owner_type=? AND owner_id=? AND ingredient_key=? AND from_unit=? AND to_unit=?`)
+          .get(conversionOwner.type, conversionOwner.id, ingredientKey, fromUnit, toUnit) as any;
+        if (existing) {
+          db.query("UPDATE ingredient_unit_conversions SET ingredient_name=?, factor=?, updated_at=? WHERE id=?")
+            .run(ingredientName, factor, new Date().toISOString(), existing.id);
+        } else {
+          db.query(`INSERT INTO ingredient_unit_conversions
+            (id, owner_type, owner_id, ingredient_key, ingredient_name, from_unit, to_unit, factor, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(randomUUID(), conversionOwner.type, conversionOwner.id, ingredientKey, ingredientName,
+              fromUnit, toUnit, factor, new Date().toISOString());
+        }
+        stats.conversions++;
+      }
+
+      for (const originalRecipeId of ensureArray(body.todayMenu)) {
+        const recipeId = recipeIdMap.get(String(originalRecipeId)) || String(originalRecipeId);
+        const allowedRecipe = db.query(`SELECT id FROM recipes WHERE id=? AND ${filterCol}=?${extraWhere}`).get(recipeId, ownerId);
+        if (!allowedRecipe) continue;
+        const result = db.query("INSERT OR IGNORE INTO today_menu (user_id, family_id, recipe_id) VALUES (?, ?, ?)")
+          .run(userId, scope.familyId, recipeId);
+        if (result.changes) stats.menu++;
+      }
+
+      const importedSettings = body.settings || {};
+      if (!scope.familyId && (importedSettings.baseUrl || importedSettings.base_url || importedSettings.model)) {
+        const existingSettings = db.query("SELECT api_key FROM settings WHERE user_id=?").get(userId) as any;
+        db.query(`INSERT INTO settings (user_id, base_url, api_key, model) VALUES (?, ?, ?, ?)
+          ON CONFLICT(user_id) DO UPDATE SET base_url=excluded.base_url, model=excluded.model`)
+          .run(userId, importedSettings.baseUrl || importedSettings.base_url || "https://api.deepseek.com/v1",
+            existingSettings?.api_key || "", importedSettings.model || "deepseek-v4-flash");
+      }
+    });
+
+    try {
+      restore();
+      return json({ ok: true, ...stats });
+    } catch (error: any) {
+      return json({ error: `导入失败，所有变更已回滚: ${error?.message || error}` }, 400);
+    }
   }
 
   // AI proxy
@@ -543,7 +889,7 @@ async function handle(req: Request): Promise<Response> {
     return json(rows.map(r => ({
       ...r,
       tags: JSON.parse(r.tags || "[]"),
-      ingredients: JSON.parse(r.ingredients || "[]"),
+      ingredients: normalizeRecipeIngredients(JSON.parse(r.ingredients || "[]")),
       steps: JSON.parse(r.steps || "[]"),
       cookedDates: JSON.parse(r.cooked_dates || "[]"),
     })));
@@ -554,7 +900,7 @@ async function handle(req: Request): Promise<Response> {
     db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, userId, scope.familyId, body.name, JSON.stringify(body.tags || []),
-      JSON.stringify(body.ingredients || []), JSON.stringify(body.steps || []),
+      JSON.stringify(normalizeRecipeIngredients(body.ingredients || [])), JSON.stringify(body.steps || []),
       body.notes || "", body.source || "manual", body.rating || 0,
       JSON.stringify(body.cookedDates || []), new Date().toISOString(), new Date().toISOString()
     );
@@ -562,19 +908,19 @@ async function handle(req: Request): Promise<Response> {
   }
   if (method === "PUT" && path.startsWith("/api/recipes/")) {
     const id = path.split("/")[3];
-    const existing = db.query(`SELECT id FROM recipes WHERE id = ? AND ${filterCol} = ?`).get(id, ownerId);
+    const existing = db.query(`SELECT id FROM recipes WHERE id = ? AND ${filterCol} = ?${extraWhere}`).get(id, ownerId);
     if (!existing) return json({ error: "菜谱不存在" }, 404);
     const body = await req.json();
-    db.query(`UPDATE recipes SET name=?, tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, cooked_dates=?, updated_at=? WHERE id=? AND ${filterCol}=?`)
-      .run(body.name, JSON.stringify(body.tags || []), JSON.stringify(body.ingredients || []),
+    db.query(`UPDATE recipes SET name=?, tags=?, ingredients=?, steps=?, notes=?, source=?, rating=?, cooked_dates=?, updated_at=? WHERE id=? AND ${filterCol}=?${extraWhere}`)
+      .run(body.name, JSON.stringify(body.tags || []), JSON.stringify(normalizeRecipeIngredients(body.ingredients || [])),
         JSON.stringify(body.steps || []), body.notes || "", body.source || "manual",
         body.rating || 0, JSON.stringify(body.cookedDates || []), new Date().toISOString(), id, ownerId);
     return json({ ok: true });
   }
   if (method === "DELETE" && path.startsWith("/api/recipes/")) {
     const id = path.split("/")[3];
-    db.query(`DELETE FROM today_menu WHERE recipe_id = ? AND ${filterCol} = ?`).run(id, ownerId);
-    db.query(`DELETE FROM recipes WHERE id = ? AND ${filterCol} = ?`).run(id, ownerId);
+    db.query(`DELETE FROM today_menu WHERE recipe_id = ? AND ${filterCol} = ?${extraWhere}`).run(id, ownerId);
+    db.query(`DELETE FROM recipes WHERE id = ? AND ${filterCol} = ?${extraWhere}`).run(id, ownerId);
     return json({ ok: true });
   }
 
@@ -586,32 +932,39 @@ async function handle(req: Request): Promise<Response> {
   if (method === "POST" && path === "/api/inventory") {
     const body = await req.json();
     // Accumulate if same name AND same unit (including both empty). Different units → keep as separate rows.
-    const existing = db.query(`SELECT id, amount, unit FROM inventory WHERE name = ? AND ${filterCol} = ?`).get(body.name, ownerId) as any;
     const bodyUnit = (body.unit || "").trim();
-    const existingUnit = (existing?.unit || "").trim();
-    if (existing && body.amount && bodyUnit === existingUnit) {
-      const oldNum = parseFloat(existing.amount) || 0;
-      const newNum = parseFloat(body.amount) || 0;
-      const sum = String(oldNum + newNum);
-      db.query("UPDATE inventory SET amount=?, unit=?, category=?, updated_at=? WHERE id=?")
-        .run(sum, bodyUnit, body.category || "其他", new Date().toISOString(), existing.id);
+    const normalizedAmount = normalizeAmountForStorage(body.amount || "", bodyUnit);
+    const existing = db.query(`SELECT id, amount, unit FROM inventory
+      WHERE name = ? AND ${filterCol} = ?${extraWhere} AND TRIM(COALESCE(unit, '')) = ?
+      ORDER BY updated_at DESC LIMIT 1`).get(body.name, ownerId, bodyUnit) as any;
+    if (existing && normalizedAmount) {
+      const oldParsed = parseQuantity(existing.amount, existing.unit || "");
+      const newParsed = parseQuantity(normalizedAmount, bodyUnit);
+      const mergedAmount = oldParsed.value !== null && newParsed.value !== null
+        ? formatQuantity(oldParsed.value + newParsed.value)
+        : normalizedAmount;
+      db.query(`UPDATE inventory SET amount=?, unit=?, category=?, version=COALESCE(version, 1)+1, updated_at=?
+        WHERE id=? AND ${filterCol}=?${extraWhere}`)
+        .run(mergedAmount, bodyUnit, body.category || "其他", new Date().toISOString(), existing.id, ownerId);
       return json({ id: existing.id, merged: true });
     }
     const id = body.id || randomUUID();
     db.query(`INSERT INTO inventory (id, user_id, family_id, name, amount, unit, category, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, userId, scope.familyId, body.name, body.amount || "", body.unit || "", body.category || "其他", new Date().toISOString());
+      .run(id, userId, scope.familyId, body.name, normalizedAmount, bodyUnit, body.category || "其他", new Date().toISOString());
     return json({ id, merged: false });
   }
   if (method === "PUT" && path.startsWith("/api/inventory/")) {
     const id = path.split("/")[3];
     const body = await req.json();
-    db.query(`UPDATE inventory SET name=?, amount=?, unit=?, category=?, updated_at=? WHERE id=? AND ${filterCol}=?`)
-      .run(body.name, body.amount || "", body.unit || "", body.category || "其他", new Date().toISOString(), id, ownerId);
+    const unit = String(body.unit || "").trim();
+    const amount = normalizeAmountForStorage(body.amount || "", unit);
+    db.query(`UPDATE inventory SET name=?, amount=?, unit=?, category=?, version=COALESCE(version, 1)+1, updated_at=? WHERE id=? AND ${filterCol}=?${extraWhere}`)
+      .run(body.name, amount, unit, body.category || "其他", new Date().toISOString(), id, ownerId);
     return json({ ok: true });
   }
   if (method === "DELETE" && path.startsWith("/api/inventory/")) {
     const id = path.split("/")[3];
-    db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?`).run(id, ownerId);
+    db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?${extraWhere}`).run(id, ownerId);
     return json({ ok: true });
   }
 
@@ -635,100 +988,242 @@ async function handle(req: Request): Promise<Response> {
     return json({ ok: true });
   }
 
+  // Cooking history
+  if (method === "GET" && path === "/api/history") {
+    const where = [scope.familyId ? "h.family_id = ?" : "h.user_id = ? AND h.family_id IS NULL"];
+    const params: Array<string> = [ownerId];
+    const from = url.searchParams.get("from");
+    const to = url.searchParams.get("to");
+    if (from) {
+      if (Number.isNaN(Date.parse(from))) return json({ error: "开始日期格式不正确" }, 400);
+      where.push("h.cooked_at >= ?");
+      params.push(from);
+    }
+    if (to) {
+      if (Number.isNaN(Date.parse(to))) return json({ error: "结束日期格式不正确" }, 400);
+      where.push("h.cooked_at <= ?");
+      params.push(to);
+    }
+    const rows = db.query(`SELECT h.id, h.recipe_id, h.recipe_name, h.user_id, h.family_id,
+        h.cooked_at, h.servings, h.notes, u.username, r.tags AS recipe_tags
+      FROM cook_history h
+      LEFT JOIN users u ON u.id = h.user_id
+      LEFT JOIN recipes r ON r.id = h.recipe_id
+      WHERE ${where.join(" AND ")}
+      ORDER BY h.cooked_at DESC, h.created_at DESC`).all(...params) as any[];
+    return json(rows.map(row => ({
+      id: row.id,
+      recipeId: row.recipe_id,
+      recipeName: row.recipe_name,
+      userId: row.user_id,
+      username: row.username || null,
+      familyId: row.family_id,
+      cookedAt: row.cooked_at,
+      servings: row.servings,
+      notes: row.notes || "",
+      recipeTags: ensureArray(row.recipe_tags),
+    })));
+  }
+  if (method === "DELETE" && path.startsWith("/api/history/")) {
+    const historyId = path.split("/")[3];
+    const history = db.query(`SELECT * FROM cook_history
+      WHERE id = ? AND ${filterCol} = ?${extraWhere}`).get(historyId, ownerId) as any;
+    if (!history) return json({ error: "记录不存在或无权撤销" }, 404);
+
+    const removeHistory = db.transaction(() => {
+      db.query("DELETE FROM cook_history WHERE id = ?").run(historyId);
+      if (!history.recipe_id) return;
+      const recipe = db.query("SELECT cooked_dates FROM recipes WHERE id = ?").get(history.recipe_id) as any;
+      if (!recipe) return;
+      const dates = ensureArray(recipe.cooked_dates);
+      const matchingIndex = dates.indexOf(history.cooked_at);
+      if (matchingIndex === -1) return;
+      dates.splice(matchingIndex, 1);
+      db.query("UPDATE recipes SET cooked_dates=?, updated_at=? WHERE id=?")
+        .run(JSON.stringify(dates), new Date().toISOString(), history.recipe_id);
+    });
+    removeHistory();
+    return json({ ok: true });
+  }
+
   // Cook
   if (method === "POST" && path.startsWith("/api/cook/")) {
     const recipeId = path.split("/")[3];
+    const isPreview = path.endsWith("/preview");
     const body = await req.json().catch(() => ({}));
-    const recipe = db.query(`SELECT * FROM recipes WHERE id = ? AND ${filterCol} = ?`).get(recipeId, ownerId) as any;
+    const recipe = db.query(`SELECT * FROM recipes WHERE id = ? AND ${filterCol} = ?${extraWhere}`).get(recipeId, ownerId) as any;
     if (!recipe) return json({ error: "菜谱不存在" }, 404);
 
     const ingredients = JSON.parse(recipe.ingredients || "[]");
     const inventory = db.query(`SELECT * FROM inventory WHERE ${filterCol} = ?${extraWhere}`).all(ownerId) as any[];
+    const conversionOwner = getConversionOwner(scope);
+    const conversions = db.query(`SELECT ingredient_key, ingredient_name, from_unit, to_unit, factor
+      FROM ingredient_unit_conversions WHERE owner_type=? AND owner_id=?`)
+      .all(conversionOwner.type, conversionOwner.id) as UnitConversionRule[];
+    const plan = buildCookPlan(ingredients, inventory, conversions);
 
-    if (body.deductions) {
-      for (const d of body.deductions) {
-        const inv = findInventoryMatch(d.name, inventory);
-        if (!inv) continue;
-        if (d.remove) {
-          db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?`).run(inv.id, ownerId);
-        } else if (d.remaining) {
-          const remainNum = parseAmount(d.remaining);
-          if (remainNum !== null && remainNum <= 0) {
-            db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?`).run(inv.id, ownerId);
-          } else {
-            db.query(`UPDATE inventory SET amount=?, unit=?, updated_at=? WHERE id=? AND ${filterCol}=?`)
-              .run(d.remaining, d.unit || inv.unit, new Date().toISOString(), inv.id, ownerId);
-          }
-        }
-      }
-    } else {
-      for (const ing of ingredients) {
-        if (ing.optional) continue;
-        const inv = findInventoryMatch(ing.name, inventory);
-        if (!inv) continue;
-        const stockNum = parseAmount(inv.amount);
-        const needNum = parseAmount(ing.amount);
-        if (stockNum !== null && needNum !== null) {
-          const remaining = Math.max(0, stockNum - needNum);
-          if (remaining === 0) {
-            db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?`).run(inv.id, ownerId);
-          } else {
-            db.query(`UPDATE inventory SET amount=?, updated_at=? WHERE id=? AND ${filterCol}=?`)
-              .run(String(remaining) + (inv.unit || ""), new Date().toISOString(), inv.id, ownerId);
-          }
-        }
+    if (isPreview) return json(plan);
+    if (!body.deductions && plan.requiresConfirmation) {
+      return json({ error: "部分食材单位无法自动换算，请确认剩余库存", requiresConfirmation: true, plan }, 409);
+    }
+    if (Array.isArray(body.deductions)) {
+      const stale = body.deductions.find((deduction: any) => {
+        if (deduction.inventoryVersion === undefined || deduction.inventoryVersion === null) return false;
+        const current = deduction.inventoryId
+          ? inventory.find((item: any) => item.id === deduction.inventoryId)
+          : findInventoryMatch(deduction.name, inventory);
+        return !current || Number(current.version || 1) !== Number(deduction.inventoryVersion);
+      });
+      if (stale) {
+        return json({ error: `“${stale.name || "食材"}”的库存已被其他成员修改，请重新打开确认窗口` }, 409);
       }
     }
 
-    // Mark cooked
-    const cooked = JSON.parse(recipe.cooked_dates || "[]");
-    cooked.push(new Date().toISOString());
-    db.query("UPDATE recipes SET cooked_dates=?, updated_at=? WHERE id=?")
-      .run(JSON.stringify(cooked), new Date().toISOString(), recipeId);
+    const applyCook = db.transaction(() => {
+      if (body.deductions) {
+        for (const d of body.deductions) {
+          const inv = (d.inventoryId
+            ? inventory.find((item: any) => item.id === d.inventoryId)
+            : findInventoryMatch(d.name, inventory)) as any;
+          if (!inv) continue;
+          if (d.remove) {
+            db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?`).run(inv.id, ownerId);
+            continue;
+          }
+          const rawRemaining = String(d.remaining ?? "").trim();
+          if (!rawRemaining) continue;
+          const unit = String(d.unit || inv.unit || "").trim();
+          const amount = normalizeAmountForStorage(rawRemaining, unit);
+          const remainNum = parseAmount(amount);
+          if (remainNum !== null && remainNum <= 0) {
+            db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?`).run(inv.id, ownerId);
+          } else {
+            db.query(`UPDATE inventory SET amount=?, unit=?, version=COALESCE(version, 1)+1, updated_at=? WHERE id=? AND ${filterCol}=?`)
+              .run(amount, unit, new Date().toISOString(), inv.id, ownerId);
+          }
+        }
+      } else {
+        const grouped = new Map<string, { stockQuantity: number; convertedNeeded: number }>();
+        for (const item of plan.items) {
+          if (item.status !== "ready" || !item.inventoryId || item.stockQuantity === null || item.convertedNeeded === null) continue;
+          const current = grouped.get(item.inventoryId) || { stockQuantity: item.stockQuantity, convertedNeeded: 0 };
+          current.convertedNeeded += item.convertedNeeded;
+          grouped.set(item.inventoryId, current);
+        }
+        for (const [inventoryId, deduction] of grouped) {
+          const remaining = Math.max(0, deduction.stockQuantity - deduction.convertedNeeded);
+          if (remaining === 0) {
+            db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?`).run(inventoryId, ownerId);
+          } else {
+            db.query(`UPDATE inventory SET amount=?, version=COALESCE(version, 1)+1, updated_at=? WHERE id=? AND ${filterCol}=?`)
+              .run(formatQuantity(remaining), new Date().toISOString(), inventoryId, ownerId);
+          }
+        }
+      }
 
-    // Remove from menu
-    db.query(`DELETE FROM today_menu WHERE ${filterCol} = ?${extraWhere} AND recipe_id = ?`).run(ownerId, recipeId);
+      const cookedAt = new Date().toISOString();
+      const cooked = JSON.parse(recipe.cooked_dates || "[]");
+      cooked.push(cookedAt);
+      db.query("UPDATE recipes SET cooked_dates=?, updated_at=? WHERE id=?")
+        .run(JSON.stringify(cooked), new Date().toISOString(), recipeId);
+      db.query(`INSERT INTO cook_history
+        (id, recipe_id, recipe_name, user_id, family_id, cooked_at)
+        VALUES (?, ?, ?, ?, ?, ?)`).run(
+          randomUUID(), recipeId, recipe.name, userId, scope.familyId, cookedAt,
+        );
+      db.query(`DELETE FROM today_menu WHERE ${filterCol} = ?${extraWhere} AND recipe_id = ?`).run(ownerId, recipeId);
+    });
+    applyCook();
 
-    return json({ ok: true });
+    return json({ ok: true, deductions: plan.items });
   }
 
   return json({ error: "Not found" }, 404);
 }
 
 // ===== Helpers for cook deduction =====
+function normalizeRecipeIngredients(ingredients: any[]): any[] {
+  return ingredients.map((ingredient: any) => {
+    const sourceAmount = ingredient.amount !== undefined ? ingredient.amount : ingredient.quantity;
+    const parsed = parseQuantity(sourceAmount, ingredient.unit || "");
+    if (parsed.value !== null && !parsed.ambiguous) {
+      return { ...ingredient, quantity: parsed.value, unit: parsed.unit };
+    }
+    const normalized = { ...ingredient };
+    delete normalized.quantity;
+    return normalized;
+  });
+}
+
+function buildCookPlan(ingredients: any[], inventory: any[], conversions: UnitConversionRule[]) {
+  const items = ingredients.filter((ing: any) => !ing.optional).map((ing: any) => {
+    const candidates = inventory.filter((item: any) => ingredientNamesMatch(ing.name, item.name));
+    const recipeAmount = ing.quantity ?? ing.amount ?? "";
+    const recipeUnit = ing.unit || "";
+    if (!candidates.length) {
+      return {
+        name: ing.name,
+        recipeAmount: ing.amount || `${recipeAmount}${recipeUnit}`,
+        status: "missing-inventory",
+        inventoryId: null,
+      };
+    }
+
+    const evaluated = candidates.map((inv: any) => ({
+      inv,
+      result: calculateDeduction({
+        ingredientName: ing.name,
+        recipeAmount,
+        recipeUnit,
+        inventoryAmount: inv.amount,
+        inventoryUnit: inv.unit,
+        rules: conversions,
+      }),
+    }));
+    const priority: Record<string, number> = {
+      ready: 0,
+      "needs-conversion": 1,
+      "ambiguous-recipe": 2,
+      "unparsed-recipe": 3,
+      "unparsed-inventory": 4,
+    };
+    evaluated.sort((a, b) => (priority[a.result.status] ?? 9) - (priority[b.result.status] ?? 9));
+    const selected = evaluated[0];
+    return {
+      name: ing.name,
+      recipeAmount: ing.amount || `${recipeAmount}${recipeUnit}`,
+      inventoryId: selected.inv.id,
+      inventoryAmount: selected.inv.amount,
+      inventoryUnit: selected.inv.unit || "",
+      inventoryUpdatedAt: selected.inv.updated_at,
+      inventoryVersion: Number(selected.inv.version || 1),
+      ...selected.result,
+    };
+  });
+  return {
+    items,
+    requiresConfirmation: items.some((item: any) =>
+      item.status === "needs-conversion" || item.status === "ambiguous-recipe" || item.status === "unparsed-inventory"),
+  };
+}
+
 function parseAmount(s: string): number | null {
   if (!s) return null;
   const m = s.trim().match(/^(\d+(?:\.\d+)?)/);
   return m ? parseFloat(m[1]) : null;
 }
 
-function normalizeIngredientName(name: string): string {
-  return name.trim()
-    .replace(/[（(][^）)]*[）)]/g, "")
-    .replace(/\s+/g, "")
-    .toLowerCase();
-}
-
 function findInventoryMatch(name: string, inventory: any[]): any | null {
-  const norm = normalizeIngredientName(name);
-  return inventory.find((i: any) => {
-    const invNorm = normalizeIngredientName(i.name);
-    if (invNorm === norm) return true;
-    const long = invNorm.length >= norm.length ? invNorm : norm;
-    const short = invNorm.length >= norm.length ? norm : invNorm;
-    if (short.length >= 1 && long.endsWith(short)) return true;
-    if (invNorm.length >= 2 && norm.length >= 2) {
-      if (invNorm.includes(norm) || norm.includes(invNorm)) return true;
-    }
-    return false;
-  }) || null;
+  return inventory.find((i: any) => ingredientNamesMatch(name, i.name)) || null;
 }
 
 // ===== Start =====
-console.log(`🔐 JWT secret: ${JWT_SECRET.slice(0, 8)}...`);
-console.log(`🌿 KnowIngre server running at http://localhost:${PORT}`);
+if (import.meta.main) {
+  console.log("🔐 Authentication secret loaded");
+  console.log(`🌿 KnowIngre server running at http://localhost:${PORT}`);
 
-Bun.serve({
-  port: PORT,
-  fetch: handle,
-});
+  Bun.serve({
+    port: PORT,
+    fetch: handle,
+  });
+}

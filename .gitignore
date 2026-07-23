@@ -2,6 +2,7 @@
 data.db
 data.db-shm
 data.db-wal
+backups/
 
 # System files
 .DS_Store

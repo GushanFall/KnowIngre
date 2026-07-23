@@ -40,7 +40,9 @@ function getDefaultData() {
     settings: { baseUrl: 'https://api.deepseek.com/v1', hasApiKey: false, model: 'deepseek-v4-flash' },
     recipes: [],
     inventory: [],
-    todayMenu: []
+    todayMenu: [],
+    unitConversions: [],
+    history: []
   };
 }
 
@@ -102,7 +104,7 @@ function uid() {
 }
 
 function scoped(path) {
-  if (currentScope === 'family' && (path.startsWith('/api/recipes') || path.startsWith('/api/inventory') || path.startsWith('/api/menu') || path.startsWith('/api/cook'))) {
+  if (currentScope === 'family' && (path.startsWith('/api/recipes') || path.startsWith('/api/inventory') || path.startsWith('/api/menu') || path.startsWith('/api/cook') || path.startsWith('/api/history') || path.startsWith('/api/unit-conversions') || path.startsWith('/api/import'))) {
     const sep = path.includes('?') ? '&' : '?';
     return path + sep + 'scope=family';
   }
@@ -110,10 +112,12 @@ function scoped(path) {
 }
 
 async function fetchAllData() {
-  const [recipes, inventory, menu, rawSettings] = await Promise.all([
+  const [recipes, inventory, menu, unitConversions, history, rawSettings] = await Promise.all([
     apiFetch(scoped('/api/recipes')),
     apiFetch(scoped('/api/inventory')),
     apiFetch(scoped('/api/menu')),
+    apiFetch(scoped('/api/unit-conversions')),
+    apiFetch(scoped('/api/history')),
     apiFetch('/api/settings').catch(() => ({}))
   ]);
   // Map server snake_case to frontend camelCase
@@ -122,7 +126,7 @@ async function fetchAllData() {
     hasApiKey: !!rawSettings.has_api_key,
     model: rawSettings.model || 'deepseek-v4-flash'
   };
-  dataCache = { recipes, inventory, todayMenu: menu, settings };
+  dataCache = { recipes, inventory, todayMenu: menu, unitConversions, history, settings };
   return dataCache;
 }
 
@@ -135,6 +139,9 @@ let editingInventoryId = null;
 let recipeFormDirty = false;
 let invSearchText = '';
 let invFilterCategory = 'all';
+let historyRange = '30';
+let historyYear = new Date().getFullYear();
+let selectedHistoryDate = null;
 
 // ===== Toast Notifications =====
 function showToast(message, type) {
@@ -143,7 +150,14 @@ function showToast(message, type) {
   const toast = document.createElement('div');
   toast.className = `toast toast--${type}`;
   const icon = type === 'success' ? I.check : type === 'error' ? I.xmark : '';
-  toast.innerHTML = `${icon ? '<span class="icon icon-sm">' + icon + '</span> ' : ''}${message}`;
+  if (icon) {
+    const iconEl = document.createElement('span');
+    iconEl.className = 'icon icon-sm';
+    iconEl.innerHTML = icon; // Internal SVG constant, never user content.
+    toast.appendChild(iconEl);
+    toast.appendChild(document.createTextNode(' '));
+  }
+  toast.appendChild(document.createTextNode(String(message ?? '')));
   container.appendChild(toast);
   const duration = type === 'error' ? 4000 : 2500;
   setTimeout(() => {
@@ -182,6 +196,7 @@ function renderCurrentTab() {
   if (currentTab === 'recipes') renderRecipes();
   else if (currentTab === 'inventory') renderInventory();
   else if (currentTab === 'menu') renderMenu();
+  else if (currentTab === 'history') renderHistory();
   updateStats();
 }
 
@@ -193,6 +208,243 @@ function updateStats() {
   document.getElementById('statsText').innerHTML =
     `<span class="icon icon-sm">${scopeIcon}</span> ${scopeLabel} &nbsp;|&nbsp; <span class="icon icon-sm">${I.home}</span> ${d.recipes.length} 份菜谱 &nbsp;|&nbsp; <span class="icon icon-sm">${I.import}</span> ${d.inventory.length} 种食材 &nbsp;|&nbsp; <span class="icon icon-sm">${I.menu}</span> ${d.todayMenu.length} 道今日菜单`;
 }
+
+// ===== Cooking History =====
+function localDateKey(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const pad = number => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function getHistoryStreak(items) {
+  const days = [...new Set(items.map(item => localDateKey(item.cookedAt)).filter(Boolean))].sort().reverse();
+  if (!days.length) return 0;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const latest = new Date(`${days[0]}T00:00:00`);
+  const gap = Math.round((today.getTime() - latest.getTime()) / 86400000);
+  if (gap > 1) return 0;
+  let streak = 1;
+  let cursor = latest;
+  for (let index = 1; index < days.length; index++) {
+    const expected = new Date(cursor);
+    expected.setDate(expected.getDate() - 1);
+    if (localDateKey(expected) !== days[index]) break;
+    streak++;
+    cursor = expected;
+  }
+  return streak;
+}
+
+function filteredHistory(items) {
+  const now = new Date();
+  let filtered = items.filter(item => !Number.isNaN(new Date(item.cookedAt).getTime()));
+  if (historyRange === '30') {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - 29);
+    filtered = filtered.filter(item => new Date(item.cookedAt) >= start);
+  } else if (historyRange === 'year') {
+    filtered = filtered.filter(item => new Date(item.cookedAt).getFullYear() === now.getFullYear());
+  }
+  if (selectedHistoryDate) filtered = filtered.filter(item => localDateKey(item.cookedAt) === selectedHistoryDate);
+  return filtered;
+}
+
+function historyMetric(label, value, hint) {
+  return `<div class="history-metric"><span class="history-metric-label">${esc(label)}</span><strong>${esc(String(value))}</strong><span class="history-metric-hint">${esc(hint)}</span></div>`;
+}
+
+function renderHistory() {
+  const content = document.getElementById('historyContent');
+  const items = [...(getData().history || [])].sort((a, b) => new Date(b.cookedAt) - new Date(a.cookedAt));
+  document.querySelectorAll('[data-history-range]').forEach(button => {
+    button.classList.toggle('active', button.dataset.historyRange === historyRange);
+    button.setAttribute('aria-pressed', button.dataset.historyRange === historyRange ? 'true' : 'false');
+  });
+
+  const now = new Date();
+  const thisMonth = items.filter(item => {
+    const date = new Date(item.cookedAt);
+    return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth();
+  }).length;
+  const uniqueDishes = new Set(items.map(item => item.recipeId || item.recipeName)).size;
+  const metrics = [
+    historyMetric('累计下厨', items.length, '次烹饪记录'),
+    historyMetric('做过的菜', uniqueDishes, '道不同菜品'),
+    historyMetric('本月下厨', thisMonth, `${now.getMonth() + 1} 月累计`),
+    historyMetric('连续下厨', getHistoryStreak(items), '天'),
+  ].join('');
+
+  if (!items.length) {
+    content.innerHTML = `<div class="history-metrics">${metrics}</div>
+      <div class="history-empty"><div class="history-empty-mark">○</div><h3>还没有烹饪足迹</h3><p>菜谱标记为“做完”后，这里会自动留下记录。</p></div>`;
+    return;
+  }
+
+  const years = [...new Set(items.map(item => new Date(item.cookedAt).getFullYear()).filter(Number.isFinite))];
+  if (!years.includes(now.getFullYear())) years.push(now.getFullYear());
+  years.sort((a, b) => b - a);
+  if (!years.includes(historyYear)) historyYear = years[0];
+
+  const countsByDay = new Map();
+  items.forEach(item => {
+    const key = localDateKey(item.cookedAt);
+    if (key && key.startsWith(`${historyYear}-`)) countsByDay.set(key, (countsByDay.get(key) || 0) + 1);
+  });
+  const yearStart = new Date(historyYear, 0, 1);
+  const yearEnd = new Date(historyYear, 11, 31);
+  const totalDays = Math.round((yearEnd - yearStart) / 86400000) + 1;
+  const weekCount = Math.ceil((yearStart.getDay() + totalDays) / 7);
+  const maxDayCount = Math.max(1, ...countsByDay.values());
+  const heatCells = [];
+  for (let dayIndex = 0; dayIndex < totalDays; dayIndex++) {
+    const date = new Date(historyYear, 0, dayIndex + 1);
+    const key = localDateKey(date);
+    const count = countsByDay.get(key) || 0;
+    const level = count ? Math.max(1, Math.ceil((count / maxDayCount) * 4)) : 0;
+    const week = Math.floor((yearStart.getDay() + dayIndex) / 7) + 1;
+    const weekday = date.getDay() + 1;
+    const label = `${date.getMonth() + 1}月${date.getDate()}日，${count ? `做了 ${count} 道菜` : '没有记录'}`;
+    heatCells.push(`<button type="button" class="history-heat-cell level-${level}${selectedHistoryDate === key ? ' selected' : ''}" style="grid-column:${week};grid-row:${weekday}" data-history-date="${key}" aria-label="${label}" title="${label}"><span>${count || ''}</span></button>`);
+  }
+  const monthLabels = Array.from({ length: 12 }, (_, month) => {
+    const date = new Date(historyYear, month, 1);
+    const dayIndex = Math.round((date - yearStart) / 86400000);
+    const week = Math.floor((yearStart.getDay() + dayIndex) / 7) + 1;
+    return `<span style="grid-column:${week}">${month + 1}月</span>`;
+  }).join('');
+
+  const visibleItems = filteredHistory(items);
+  const dishCounts = new Map();
+  visibleItems.forEach(item => {
+    const key = item.recipeId || `deleted:${item.recipeName}`;
+    const existing = dishCounts.get(key) || { name: item.recipeName, recipeId: item.recipeId, count: 0 };
+    existing.count++;
+    dishCounts.set(key, existing);
+  });
+  const ranking = [...dishCounts.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-CN')).slice(0, 10);
+  const maxDishCount = Math.max(1, ...ranking.map(item => item.count));
+  const rankingHtml = ranking.length ? ranking.map((item, index) => `<div class="history-rank-row">
+    <span class="history-rank-index">${index + 1}</span>
+    <button type="button" class="history-rank-name" ${item.recipeId ? `data-history-recipe="${escAttr(item.recipeId)}"` : 'disabled'}>${esc(item.name)}</button>
+    <div class="history-rank-track"><span style="width:${Math.max(5, item.count / maxDishCount * 100)}%"></span></div>
+    <strong>${item.count} 次</strong>
+  </div>`).join('') : '<p class="history-chart-empty">这个时间范围内还没有记录</p>';
+
+  const tagCounts = new Map();
+  visibleItems.forEach(item => {
+    const tags = Array.isArray(item.recipeTags) && item.recipeTags.length ? item.recipeTags : ['未分类'];
+    tags.forEach(tag => tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1));
+  });
+  const tags = [...tagCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const maxTagCount = Math.max(1, ...tags.map(([, count]) => count));
+  const tagsHtml = tags.length ? tags.map(([tag, count]) => `<div class="history-tag-row">
+    <div class="history-tag-label"><span>${esc(tag)}</span><strong>${count}</strong></div>
+    <div class="history-tag-track"><span style="width:${Math.max(4, count / maxTagCount * 100)}%"></span></div>
+  </div>`).join('') : '<p class="history-chart-empty">这个时间范围内还没有标签数据</p>';
+
+  const timelineHtml = visibleItems.length ? visibleItems.slice(0, 20).map(item => {
+    const date = new Date(item.cookedAt);
+    const valid = !Number.isNaN(date.getTime());
+    const day = valid ? `${date.getMonth() + 1}月${date.getDate()}日` : '日期未知';
+    const time = valid ? date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : item.cookedAt;
+    const member = currentScope === 'family' ? (item.username || '历史记录') : '';
+    return `<div class="history-timeline-item">
+      <div class="history-timeline-dot"></div>
+      <div class="history-timeline-date"><strong>${day}</strong><span>${esc(time)}</span></div>
+      <div class="history-timeline-main">
+        <button type="button" ${item.recipeId ? `data-history-recipe="${escAttr(item.recipeId)}"` : 'disabled'}>${esc(item.recipeName)}</button>
+        ${member ? `<span>${esc(member)}</span>` : ''}
+      </div>
+      <button type="button" class="history-undo" data-history-delete="${escAttr(item.id)}" aria-label="撤销这条烹饪记录" title="撤销这条记录">${I.trash}</button>
+    </div>`;
+  }).join('') : '<p class="history-chart-empty">这个时间范围内还没有记录</p>';
+
+  const filterLabel = historyRange === '30' ? '近 30 天' : historyRange === 'year' ? '今年' : '全部时间';
+  const selectedHtml = selectedHistoryDate ? `<div class="history-selected-date"><span>正在查看 ${selectedHistoryDate}</span><button type="button" data-history-date-clear>清除日期筛选</button></div>` : '';
+  content.innerHTML = `
+    <div class="history-metrics">${metrics}</div>
+    <section class="history-section history-calendar-section">
+      <div class="history-section-head"><div><h3>下厨日历</h3><p>${historyYear} 年共记录 ${[...countsByDay.values()].reduce((sum, count) => sum + count, 0)} 次</p></div>
+        <label class="history-year-select"><span>年份</span><select id="historyYearSelect">${years.map(year => `<option value="${year}" ${year === historyYear ? 'selected' : ''}>${year}</option>`).join('')}</select></label>
+      </div>
+      <div class="history-calendar-scroll">
+        <div class="history-months" style="--history-weeks:${weekCount}">${monthLabels}</div>
+        <div class="history-calendar-row"><div class="history-weekdays"><span>日</span><span></span><span>二</span><span></span><span>四</span><span></span><span>六</span></div>
+          <div class="history-heatmap" style="--history-weeks:${weekCount}" role="grid" aria-label="${historyYear} 年烹饪日历">${heatCells.join('')}</div>
+        </div>
+      </div>
+      <div class="history-legend"><span>少</span><i class="level-0"></i><i class="level-1"></i><i class="level-2"></i><i class="level-3"></i><i class="level-4"></i><span>多</span></div>
+    </section>
+    ${selectedHtml}
+    <div class="history-charts">
+      <section class="history-section"><div class="history-section-head"><div><h3>最常做的菜</h3><p>${filterLabel}</p></div></div><div class="history-ranking">${rankingHtml}</div></section>
+      <section class="history-section"><div class="history-section-head"><div><h3>口味与类型</h3><p>${filterLabel}</p></div></div><div class="history-tags-chart">${tagsHtml}</div></section>
+    </div>
+    <section class="history-section history-recent"><div class="history-section-head"><div><h3>最近做过</h3><p>${visibleItems.length} 条符合当前筛选</p></div></div><div class="history-timeline">${timelineHtml}</div></section>`;
+
+  document.getElementById('historyYearSelect')?.addEventListener('change', event => {
+    historyYear = Number(event.target.value);
+    renderHistory();
+  });
+}
+
+document.querySelectorAll('[data-history-range]').forEach(button => {
+  button.addEventListener('click', () => {
+    historyRange = button.dataset.historyRange;
+    selectedHistoryDate = null;
+    renderHistory();
+  });
+});
+
+document.getElementById('historyContent').addEventListener('click', async event => {
+  const dateButton = event.target.closest('[data-history-date]');
+  if (dateButton) {
+    selectedHistoryDate = selectedHistoryDate === dateButton.dataset.historyDate ? null : dateButton.dataset.historyDate;
+    renderHistory();
+    return;
+  }
+  if (event.target.closest('[data-history-date-clear]')) {
+    selectedHistoryDate = null;
+    renderHistory();
+    return;
+  }
+  const recipeButton = event.target.closest('[data-history-recipe]');
+  if (recipeButton) {
+    const recipe = getData().recipes.find(item => item.id === recipeButton.dataset.historyRecipe);
+    if (recipe) openRecipeModal(recipe.id);
+    else showToast('这份菜谱已被删除，但烹饪记录仍然保留', 'info');
+    return;
+  }
+  const deleteButton = event.target.closest('[data-history-delete]');
+  if (!deleteButton) return;
+  const item = getData().history.find(entry => entry.id === deleteButton.dataset.historyDelete);
+  if (!item) return;
+  const ok = await customConfirm({
+    title: '撤销烹饪记录',
+    message: `撤销“${item.recipeName}”的这次烹饪记录？`,
+    warning: '只会移除足迹和菜谱上的做过日期，不会恢复当时扣减的库存。',
+    confirmText: '撤销记录',
+    type: 'warning',
+  });
+  if (!ok) return;
+  try {
+    await apiFetch(scoped(`/api/history/${item.id}`), { method: 'DELETE' });
+    const [history, recipes] = await Promise.all([
+      apiFetch(scoped('/api/history')),
+      apiFetch(scoped('/api/recipes')),
+    ]);
+    getData().history = history;
+    getData().recipes = recipes;
+    renderHistory();
+    updateStats();
+    showToast('已撤销这条烹饪记录', 'success');
+  } catch (error) {
+    showToast('撤销失败: ' + error.message, 'error');
+  }
+});
 
 // ===== Settings =====
 function switchSettingsTab(name) {
@@ -429,26 +681,16 @@ document.getElementById('btnImportData').addEventListener('click', () => {
         }
         if (!data.settings) data.settings = getDefaultData().settings;
         if (!data.todayMenu || !Array.isArray(data.todayMenu)) data.todayMenu = [];
-        if (!await customConfirm({ title: '导入数据', message: '导入将覆盖当前所有菜谱和库存数据。建议先导出当前数据作为备份。', confirmText: '覆盖导入', type: 'danger' })) return;
+        if (!data.unitConversions || !Array.isArray(data.unitConversions)) data.unitConversions = [];
+        if (!await customConfirm({ title: '导入数据', message: '相同 ID 的菜谱和库存会更新，新内容会添加；其他现有数据不会删除。建议先导出当前数据作为备份。', confirmText: '安全导入', type: 'warning' })) return;
         try {
-          // Upload recipes
-          for (const r of data.recipes) {
-            await apiFetch(scoped('/api/recipes'), { method: 'POST', body: { ...r, id: r.id || uid() } });
-          }
-          // Upload inventory
-          for (const inv of data.inventory) {
-            await apiFetch(scoped('/api/inventory'), { method: 'POST', body: { ...inv, id: inv.id || uid() } });
-          }
-          // Upload menu
-          for (const mid of data.todayMenu) {
-            await apiFetch(scoped(`/api/menu/${mid}`), { method: 'POST' }).catch(() => {});
-          }
+          const result = await apiFetch(scoped('/api/import'), { method: 'POST', body: data });
           // Refresh
           dataCache = null;
           await fetchAllData();
+          showToast(`导入完成：菜谱新增 ${result.recipesCreated}、更新 ${result.recipesUpdated}，库存新增 ${result.inventoryCreated}、更新 ${result.inventoryUpdated}`, 'success');
         } catch (err) { showToast('导入失败: ' + err.message, 'error'); return; }
         renderCurrentTab();
-        showToast('数据导入成功！', 'success');
       } catch (err) {
         showToast('文件解析失败: ' + err.message, 'error');
       }
@@ -1450,7 +1692,10 @@ document.getElementById('invForm').addEventListener('submit', async (e) => {
     normUnit = '';
   }
   if (normUnit && normAmount.endsWith(normUnit)) {
-    normAmount = normAmount.slice(0, -normUnit.length).trim();
+    const amountWithoutUnit = normAmount.slice(0, -normUnit.length).trim();
+    if (/^(?:\d+(?:\.\d+)?|\d+\s*[\/／]\s*\d+|半)$/.test(amountWithoutUnit)) {
+      normAmount = amountWithoutUnit;
+    }
   }
 
   const d = getData();
@@ -1474,7 +1719,7 @@ document.getElementById('invForm').addEventListener('submit', async (e) => {
   if (mergeResult && !editingInventoryId) {
     const existing = d.inventory.find(i => i.name === name && i.id !== mergeResult.id);
     if (!mergeResult.merged && existing) {
-      showToast(`已作为新记录保存 (单位不同于已有 ${esc(existing.amount)}${esc(existing.unit || '')})`, 'info');
+      showToast(`已作为新记录保存 (单位不同于已有 ${existing.amount}${existing.unit || ''})`, 'info');
     } else if (mergeResult.merged) {
       showToast('已合并到现有食材', 'success');
     }
@@ -1522,8 +1767,8 @@ function renderMatchableRecipes() {
   container.innerHTML = filtered.map(({ recipe, missingMain, missingSeas, matchRate }) => {
     const canMake = missingMain.length === 0;
     let missingHtml = '';
-    if (!canMake) missingHtml += `<div class="match-missing">缺少主食材: ${missingMain.map(m => m.name).join('、')}</div>`;
-    if (missingSeas.length) missingHtml += `<div class="match-missing" style="color:var(--clay)">缺少调料: ${missingSeas.map(m => m.name).join('、')}</div>`;
+    if (!canMake) missingHtml += `<div class="match-missing">缺少主食材: ${missingMain.map(m => esc(m.name)).join('、')}</div>`;
+    if (missingSeas.length) missingHtml += `<div class="match-missing" style="color:var(--clay)">缺少调料: ${missingSeas.map(m => esc(m.name)).join('、')}</div>`;
     const inMenu = d.todayMenu.includes(recipe.id);
     return `
       <div class="match-card ${canMake ? '' : 'partial'}">
@@ -1547,65 +1792,96 @@ async function quickCook(recipeId) {
   const recipe = d.recipes.find(r => r.id === recipeId);
   if (!recipe) return;
   try {
+    const preview = await apiFetch(scoped(`/api/cook/${recipeId}/preview`), { method: 'POST' });
+    if (preview.requiresConfirmation) {
+      await showCookDoneDialog(recipeId, preview);
+      return;
+    }
     await apiFetch(scoped(`/api/cook/${recipeId}`), { method: 'POST' });
-    const [recipes, inventory, menu] = await Promise.all([
-      apiFetch(scoped('/api/recipes')),
-      apiFetch(scoped('/api/inventory')),
-      apiFetch(scoped('/api/menu'))
-    ]);
-    d.recipes = recipes;
-    d.inventory = inventory;
-    d.todayMenu = menu;
+    await refreshCookData(d);
   } catch (err) {
     showToast('操作失败: ' + err.message, 'error');
     return;
   }
-  showToast(`✓ ${esc(recipe.name)} 已完成，库存已扣减`, 'success');
+  showToast(`✓ ${recipe.name} 已完成，库存已扣减`, 'success');
   renderCurrentTab();
 }
 
-function showCookDoneDialog(recipeId) {
+async function refreshCookData(d) {
+  const [recipes, inventory, menu, unitConversions, history] = await Promise.all([
+    apiFetch(scoped('/api/recipes')),
+    apiFetch(scoped('/api/inventory')),
+    apiFetch(scoped('/api/menu')),
+    apiFetch(scoped('/api/unit-conversions')),
+    apiFetch(scoped('/api/history'))
+  ]);
+  d.recipes = recipes;
+  d.inventory = inventory;
+  d.todayMenu = menu;
+  d.unitConversions = unitConversions;
+  d.history = history;
+}
+
+async function showCookDoneDialog(recipeId, suppliedPreview = null) {
   const d = getData();
   const recipe = d.recipes.find(r => r.id === recipeId);
   if (!recipe) return;
 
-  const required = recipe.ingredients.filter(i => !i.optional);
-  const matched = required.map(ing => {
-    const inv = findInventoryItem(ing.name, d.inventory);
-    if (!inv) return null; // skip items not in inventory
-    const stockNum = parseAmount(inv.amount);
-    const needNum = parseAmount(ing.amount);
-    let remaining = inv.amount;
-    if (stockNum !== null && needNum !== null) {
-      remaining = String(Math.max(0, stockNum - needNum));
+  let preview = suppliedPreview;
+  if (!preview) {
+    try {
+      preview = await apiFetch(scoped(`/api/cook/${recipeId}/preview`), { method: 'POST' });
+    } catch (err) {
+      showToast('无法计算库存扣减: ' + err.message, 'error');
+      return;
     }
-    return { ing, inv, remaining };
-  }).filter(Boolean);
+  }
+  const matched = preview.items.filter(item => item.inventoryId);
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.style.zIndex = '300';
-  let itemsHtml = matched.map((m, idx) => `
-    <div class="done-item">
+  let itemsHtml = matched.map(m => {
+    let note = '';
+    if (m.status === 'ready' && (m.conversionSource === 'universal' || m.conversionSource === 'custom')) {
+      note = `<div class="done-conversion-note done-conversion-note--ok">自动换算后扣减 ${esc(String(m.convertedNeeded))}${m.inventoryUnit ? ' ' + esc(m.inventoryUnit) : ''}</div>`;
+    } else if (m.status === 'unparsed-recipe') {
+      note = '<div class="done-conversion-note">菜谱用量无法量化，本次默认保持库存不变</div>';
+    } else if (m.status === 'ambiguous-recipe') {
+      note = '<div class="done-conversion-note done-conversion-note--warn">菜谱使用了区间或模糊数量，请手动确认做完后的剩余库存</div>';
+    } else if (m.status === 'unparsed-inventory') {
+      note = '<div class="done-conversion-note done-conversion-note--warn">当前库存数量无法计算，请手动填写做完后的剩余量</div>';
+    } else if (m.status === 'needs-conversion') {
+      const prompt = m.conversionPrompt || {};
+      const canSave = prompt.fromUnit && prompt.toUnit;
+      note = `
+        <div class="done-conversion-note done-conversion-note--warn">“${esc(m.neededUnit || '无单位')}”无法自动换算为“${esc(m.inventoryUnit || '无单位')}”，请确认剩余库存</div>
+        ${canSave ? `<div class="done-conversion-setup">
+          <span>记住换算：1 ${esc(prompt.fromUnit)} =</span>
+          <input type="number" class="done-conversion-factor" min="0" step="any" placeholder="换算值">
+          <span>${esc(prompt.toUnit)}</span>
+          <button type="button" class="btn btn-xs" data-save-conversion>保存并计算</button>
+        </div>` : ''}`;
+    }
+    return `
+    <div class="done-item" data-name="${esc(m.name)}" data-inventory-id="${esc(m.inventoryId)}">
       <div class="done-item-head">
-        <span class="done-item-name">${esc(m.ing.name)}</span>
-        <span class="done-item-need">菜谱需: ${esc(m.ing.amount || '—')}</span>
+        <span class="done-item-name">${esc(m.name)}</span>
+        <span class="done-item-need">菜谱需: ${esc(m.recipeAmount || '—')}</span>
       </div>
+      ${note}
       <div class="done-item-edit">
         <label class="done-field">
           <span>当前库存</span>
           <div class="done-stock">
-            ${m.inv
-              ? `<span class="done-stock-val">${esc(m.inv.amount)} ${esc(m.inv.unit)}</span>`
-              : `<span style="color:var(--chili);font-size:0.82rem">库存缺货</span>`
-            }
+            <span class="done-stock-val">${esc(String(m.inventoryAmount))}${m.inventoryUnit ? ' ' + esc(m.inventoryUnit) : ''}</span>
           </div>
         </label>
         <label class="done-field">
           <span>用完剩余</span>
           <div class="inv-row" style="gap:4px">
-            <input type="text" class="done-remaining" value="${m.inv ? esc(m.remaining) : ''}" placeholder="剩余" style="flex:1;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
-            <input type="text" class="done-unit" value="${m.inv ? esc(m.inv.unit) : ''}" placeholder="单位" style="width:60px;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
+            <input type="text" class="done-remaining" value="${esc(m.remaining)}" placeholder="剩余" style="flex:1;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
+            <input type="text" class="done-unit" value="${esc(m.inventoryUnit || '')}" placeholder="单位" style="width:60px;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
           </div>
         </label>
         <label class="done-remove-cb">
@@ -1613,16 +1889,20 @@ function showCookDoneDialog(recipeId) {
         </label>
       </div>
     </div>
-  `).join('');
+  `}).join('');
+
+  if (!itemsHtml) {
+    itemsHtml = '<p style="color:var(--text-muted);font-size:0.88rem">没有匹配到可扣减的库存，仍可将菜谱标记为做完。</p>';
+  }
 
   overlay.innerHTML = `
-    <div class="modal" style="animation:modalIn 0.25s var(--ease-out);max-width:520px">
+    <div class="modal" style="animation:modalIn 0.25s var(--ease-out);max-width:580px">
       <div class="modal-header">
         <h2 style="font-size:1rem">🍽️ ${esc(recipe.name)}</h2>
         <button class="btn-icon modal-close" id="doneClose" style="border:none;background:none;cursor:pointer;font-size:1.2rem">×</button>
       </div>
       <div class="modal-body">
-        <p style="margin-bottom:16px;color:var(--text-muted);font-size:0.85rem">调整做完后的食材库存，留空则保持不变</p>
+        <p style="margin-bottom:16px;color:var(--text-muted);font-size:0.85rem">已按单位自动计算；无法换算的食材请确认剩余量。留空则保持不变。</p>
         <div class="done-list">${itemsHtml}</div>
         <div style="display:flex;gap:8px;margin-top:20px">
           <button class="btn btn-primary" id="doneConfirm">确认做完</button>
@@ -1646,6 +1926,37 @@ function showCookDoneDialog(recipeId) {
       const row = cb.closest('.done-item');
       row.querySelector('.done-remaining').disabled = cb.checked;
       row.querySelector('.done-unit').disabled = cb.checked;
+      row.querySelectorAll('.done-conversion-factor, [data-save-conversion]').forEach(el => { el.disabled = cb.checked; });
+    });
+  });
+
+  overlay.querySelectorAll('[data-save-conversion]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const row = button.closest('.done-item');
+      const item = matched.find(entry => entry.inventoryId === row.dataset.inventoryId && entry.name === row.dataset.name);
+      const factor = Number(row.querySelector('.done-conversion-factor').value);
+      if (!item?.conversionPrompt || !Number.isFinite(factor) || factor <= 0) {
+        showToast('请输入大于 0 的换算值', 'error');
+        return;
+      }
+      button.disabled = true;
+      try {
+        await apiFetch(scoped('/api/unit-conversions'), {
+          method: 'POST',
+          body: {
+            ingredientName: item.name,
+            fromUnit: item.conversionPrompt.fromUnit,
+            toUnit: item.conversionPrompt.toUnit,
+            factor,
+          }
+        });
+        showToast(`已记住 ${item.name} 的单位换算`, 'success');
+        close();
+        await showCookDoneDialog(recipeId);
+      } catch (err) {
+        button.disabled = false;
+        showToast('保存换算失败: ' + err.message, 'error');
+      }
     });
   });
 
@@ -1659,28 +1970,27 @@ function showCookDoneDialog(recipeId) {
     // Collect deductions
     const deductions = [];
     overlay.querySelectorAll('.done-item').forEach(item => {
-      const name = item.querySelector('.done-item-name').textContent;
       const remove = item.querySelector('.done-remove-check').checked;
       const remaining = item.querySelector('.done-remaining').value.trim();
       const unit = item.querySelector('.done-unit').value.trim();
-      deductions.push({ name, remove, remaining, unit });
+      deductions.push({
+        name: item.dataset.name,
+        inventoryId: item.dataset.inventoryId,
+        inventoryVersion: matched.find(entry => entry.inventoryId === item.dataset.inventoryId)?.inventoryVersion ?? null,
+        remove,
+        remaining,
+        unit
+      });
     });
 
     try {
       await apiFetch(scoped(`/api/cook/${recipe.id}`), { method: 'POST', body: { deductions } });
-      // Refresh data
-      const [recipes, inventory, menu] = await Promise.all([
-        apiFetch(scoped('/api/recipes')),
-        apiFetch(scoped('/api/inventory')),
-        apiFetch(scoped('/api/menu'))
-      ]);
-      d.recipes = recipes;
-      d.inventory = inventory;
-      d.todayMenu = menu;
+      await refreshCookData(d);
     } catch (err) { showToast('操作失败: ' + err.message, 'error'); close(); return; }
 
     close();
     renderCurrentTab();
+    showToast(`✓ ${recipe.name} 已完成，库存已更新`, 'success');
   };
 }
 
@@ -1690,6 +2000,14 @@ function esc(s) {
   const div = document.createElement('div');
   div.textContent = s;
   return div.innerHTML;
+}
+
+function escAttr(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 // Parse leading number from "300g" → 300, "3个" → 3, "适量" → null
@@ -2363,6 +2681,22 @@ async function init() {
     const d = getData();
     const menuRecipes = d.recipes.filter(r => d.todayMenu.includes(r.id));
     if (!menuRecipes.length) return;
+    let previews;
+    try {
+      previews = await Promise.all(menuRecipes.map(async recipe => ({
+        recipe,
+        preview: await apiFetch(scoped(`/api/cook/${recipe.id}/preview`), { method: 'POST' })
+      })));
+    } catch (err) {
+      showToast('无法预览库存扣减: ' + err.message, 'error');
+      return;
+    }
+    const unresolved = previews.find(item => item.preview.requiresConfirmation);
+    if (unresolved) {
+      showToast(`“${unresolved.recipe.name}”有单位需要确认，请先处理这道菜`, 'info');
+      await showCookDoneDialog(unresolved.recipe.id, unresolved.preview);
+      return;
+    }
     const ok = await customConfirm({
       title: '全部做完',
       message: `把这 ${menuRecipes.length} 道菜标记为做完，按菜谱默认用量扣减主食材库存，并清空今日菜单。`,
@@ -2377,15 +2711,7 @@ async function init() {
       for (const recipe of menuRecipes) {
         await apiFetch(scoped(`/api/cook/${recipe.id}`), { method: 'POST' });
       }
-      // Refresh data
-      const [recipes, inventory, menu] = await Promise.all([
-        apiFetch(scoped('/api/recipes')),
-        apiFetch(scoped('/api/inventory')),
-        apiFetch(scoped('/api/menu'))
-      ]);
-      d.recipes = recipes;
-      d.inventory = inventory;
-      d.todayMenu = menu;
+      await refreshCookData(d);
     } catch (err) { showToast('操作失败: ' + err.message, 'error'); return; }
 
     renderMenu();
