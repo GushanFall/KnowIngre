@@ -1316,6 +1316,7 @@ export async function handle(req: Request): Promise<Response> {
         const current = deduction.inventoryId
           ? inventory.find((item: any) => item.id === deduction.inventoryId)
           : findInventoryMatch(deduction.name, inventory);
+        if (isPantryInventory(current)) return false;
         return !current || Number(current.version || 1) !== Number(deduction.inventoryVersion);
       });
       if (stale) {
@@ -1330,6 +1331,9 @@ export async function handle(req: Request): Promise<Response> {
             ? inventory.find((item: any) => item.id === d.inventoryId)
             : findInventoryMatch(d.name, inventory)) as any;
           if (!inv) continue;
+          // Seasonings are pantry staples: recipes check their presence but cooking
+          // never changes their stock, even if an older client sends a deduction.
+          if (isPantryInventory(inv)) continue;
           if (d.remove) {
             db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?`).run(inv.id, ownerId);
             continue;
@@ -1413,6 +1417,22 @@ function buildCookPlan(ingredients: any[], inventory: any[], conversions: UnitCo
       };
     }
 
+    const pantryMatch = candidates.find(isPantryInventory);
+    if (pantryMatch) {
+      return {
+        name: ing.name,
+        recipeAmount: ing.amount || `${recipeAmount}${recipeUnit}`,
+        status: "pantry",
+        skipDeduction: true,
+        inventoryId: pantryMatch.id,
+        inventoryAmount: pantryMatch.amount,
+        inventoryUnit: pantryMatch.unit || "",
+        inventoryUpdatedAt: pantryMatch.updated_at,
+        inventoryVersion: Number(pantryMatch.version || 1),
+        remaining: String(pantryMatch.amount ?? ""),
+      };
+    }
+
     const evaluated = candidates.map((inv: any) => ({
       inv,
       result: calculateDeduction({
@@ -1449,6 +1469,12 @@ function buildCookPlan(ingredients: any[], inventory: any[], conversions: UnitCo
     requiresConfirmation: items.some((item: any) =>
       item.status === "needs-conversion" || item.status === "ambiguous-recipe" || item.status === "unparsed-inventory"),
   };
+}
+
+function isPantryInventory(item: any): boolean {
+  if (!item) return false;
+  const category = String(item.category || "").trim();
+  return category === "调料" || category === "调味料" || category === "调味品";
 }
 
 function parseAmount(s: string): number | null {

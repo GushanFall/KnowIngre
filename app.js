@@ -2325,7 +2325,8 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
       return;
     }
   }
-  const matched = preview.items.filter(item => item.inventoryId);
+  const pantryItems = preview.items.filter(item => item.inventoryId && item.skipDeduction);
+  const matched = preview.items.filter(item => item.inventoryId && !item.skipDeduction);
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -2384,6 +2385,10 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
     itemsHtml = '<p style="color:var(--text-muted);font-size:0.88rem">没有匹配到可扣减的库存，仍可将菜谱标记为做完。</p>';
   }
 
+  const pantryHtml = pantryItems.length
+    ? `<div class="done-conversion-note done-conversion-note--ok" style="margin:0 0 14px">${esc(pantryItems.map(item => item.name).join('、'))}属于常备调料，本次只检查库存，不扣减数量。</div>`
+    : '';
+
   overlay.innerHTML = `
     <div class="modal" style="animation:modalIn 0.25s var(--ease-out);max-width:580px">
       <div class="modal-header">
@@ -2392,6 +2397,7 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
       </div>
       <div class="modal-body">
         <p style="margin-bottom:16px;color:var(--text-muted);font-size:0.85rem">已按单位自动计算；无法换算的食材请确认剩余量。留空则保持不变。</p>
+        ${pantryHtml}
         <div class="done-list">${itemsHtml}</div>
         <div style="display:flex;gap:8px;margin-top:20px">
           <button class="btn btn-primary" id="doneConfirm">确认做完</button>

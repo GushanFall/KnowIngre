@@ -96,6 +96,34 @@ describe("cook deduction API", () => {
     });
   });
 
+  test("checks pantry seasonings without deducting them", async () => {
+    await request("/api/inventory", "POST", {
+      id: "soy-sauce-stock", name: "生抽", amount: "适量", unit: "", category: "调料",
+    });
+    await request("/api/recipes", "POST", {
+      id: "soy-sauce-recipe", name: "生抽测试菜",
+      ingredients: [{ name: "生抽", amount: "10ml", optional: false }], steps: [],
+    });
+
+    const preview = await request("/api/cook/soy-sauce-recipe/preview", "POST", {});
+    expect(preview.data).toMatchObject({ requiresConfirmation: false });
+    expect(preview.data.items[0]).toMatchObject({
+      status: "pantry", skipDeduction: true, inventoryId: "soy-sauce-stock", remaining: "适量",
+    });
+
+    expect((await request("/api/cook/soy-sauce-recipe", "POST", {})).status).toBe(200);
+    expect((await request("/api/cook/soy-sauce-recipe", "POST", {
+      deductions: [{
+        name: "生抽", inventoryId: "soy-sauce-stock", inventoryVersion: 0,
+        remaining: "0", unit: "", remove: true,
+      }],
+    })).status).toBe(200);
+
+    const inventory = await request("/api/inventory");
+    expect(inventory.data.find((item: any) => item.id === "soy-sauce-stock"))
+      .toMatchObject({ amount: "适量", unit: "", category: "调料" });
+  });
+
   test("does not match scallion to onion", async () => {
     await request("/api/inventory", "POST", {
       id: "onion-stock", name: "洋葱", amount: "2", unit: "个", category: "蔬菜",
