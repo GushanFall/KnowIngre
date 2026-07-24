@@ -14,6 +14,7 @@ import {
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 const DATABASE_PATH = process.env.KNOWINGRE_DB_PATH || "data.db";
 const TOKEN_EXPIRY = 7 * 24 * 60 * 60 * 1000; // 7 days
+const OPEN_REGISTRATION = process.env.OPEN_REGISTRATION === "1";
 
 // ===== Database =====
 const db = new Database(DATABASE_PATH);
@@ -175,6 +176,31 @@ function migrateCookHistory() {
   migrate();
 }
 
+function migrateFamilyMenuUniqueness() {
+  const version = "2026-07-family-menu-unique-v1";
+  if (db.query("SELECT version FROM schema_migrations WHERE version=?").get(version)) return;
+  const migrate = db.transaction(() => {
+    const duplicateGroups = db.query(`SELECT family_id, recipe_id
+      FROM today_menu
+      WHERE family_id IS NOT NULL
+      GROUP BY family_id, recipe_id
+      HAVING COUNT(*) > 1`).all() as any[];
+    for (const group of duplicateGroups) {
+      const keep = db.query(`SELECT rowid FROM today_menu
+        WHERE family_id=? AND recipe_id=?
+        ORDER BY added_at DESC, rowid DESC LIMIT 1`).get(group.family_id, group.recipe_id) as any;
+      if (!keep) continue;
+      db.query(`DELETE FROM today_menu
+        WHERE family_id=? AND recipe_id=? AND rowid<>?`)
+        .run(group.family_id, group.recipe_id, keep.rowid);
+    }
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_today_menu_family_recipe
+      ON today_menu(family_id, recipe_id) WHERE family_id IS NOT NULL`);
+    db.query("INSERT INTO schema_migrations (version) VALUES (?)").run(version);
+  });
+  migrate();
+}
+
 function resolveJwtSecret(): string {
   const configured = String(process.env.JWT_SECRET || "").trim();
   if (configured) return configured;
@@ -187,6 +213,7 @@ function resolveJwtSecret(): string {
 
 migrateLegacyInventoryAmounts();
 migrateCookHistory();
+migrateFamilyMenuUniqueness();
 const JWT_SECRET = resolveJwtSecret();
 
 // ===== AI Prompts =====
@@ -221,6 +248,37 @@ const AI_MODIFY_PROMPT = `你是一个专业的中餐厨师助手。用户会提
 标签请从以下列表中优先选择（最多3个）：家常、快手、川菜、粤菜、湘菜、鲁菜、凉菜、汤羹、主食、面食、烘焙、蒸菜、炖煮、煎炸、烧烤、素食、早餐、下酒、宴客、减脂。如果没有合适的，可补充一个自定义标签。
 保持 JSON 结构完整，只做用户要求的修改，其他部分尽量保持原样。`;
 
+const KITCHEN_ASSISTANT_PROMPT = `你是 KnowIngre 的“厨房灵感”助手，负责回答用户关于做菜、食材和菜谱的自然语言问题。
+
+回答原则：
+1. 先直接回答用户的问题，不要强行把所有问题都变成库存推荐。用户问“鱼有哪些做法”时，先介绍清蒸、红烧、香煎、煮汤等合适方向；用户问“现在能做什么”时，再结合库存给出推荐。
+2. 当提供库存上下文时，只能把其中列出的食材和数量当作已知事实；不要虚构库存，不要擅自修改库存。单位不确定时明确说明。
+3. 可以推荐当前菜谱库中没有的新菜，并明确说“新推荐”；已有菜谱请标注“菜谱库已有”。不要假装已经保存菜谱。
+4. 回答清晰、实用、适合家庭厨房。推荐菜时尽量给出理由、预计时间、难度和关键食材；需要时列出缺少的食材。
+5. 可以连续理解上下文中的追问。除非用户要求完整菜谱，否则不要一次输出过长的步骤；用户要求时再给出详细食材和步骤。
+6. 使用简洁的 Markdown：短标题、项目符号和必要的加粗即可，不要输出 JSON、代码块或表格。`;
+
+// ===== Auth and AI Rate Limits (per-process, in-memory) =====
+const AUTH_RATE_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_RATE_MAX = 30;
+const authAttemptLog = new Map<string, number[]>();
+function authClientKey(req: Request): string {
+  const forwarded = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  return forwarded || req.headers.get("x-real-ip")?.trim() || "unknown";
+}
+function checkAuthRateLimit(req: Request, username: string): boolean {
+  const now = Date.now();
+  const keys = [`ip:${authClientKey(req)}`, `user:${username.trim().toLowerCase()}`];
+  const current = keys.map(key => {
+    const log = (authAttemptLog.get(key) || []).filter(t => now - t < AUTH_RATE_WINDOW_MS);
+    authAttemptLog.set(key, log);
+    return log;
+  });
+  if (current.some(log => log.length >= AUTH_RATE_MAX)) return false;
+  current.forEach(log => log.push(now));
+  return true;
+}
+
 // ===== AI Rate Limit (per-user, in-memory) =====
 const AI_RATE_WINDOW_MS = 60 * 60 * 1000;
 const AI_RATE_MAX = 30;
@@ -232,6 +290,39 @@ function checkAiRateLimit(userId: string): boolean {
   log.push(now);
   aiCallLog.set(userId, log);
   return true;
+}
+
+const SAFE_RECORD_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+function normalizeRecordId(value: unknown): string {
+  const candidate = String(value ?? "").trim();
+  return SAFE_RECORD_ID.test(candidate) ? candidate : randomUUID();
+}
+
+function isPrivateHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return true;
+  const isIpv6 = host.includes(":");
+  if (isIpv6 && (host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:") || host.startsWith("::ffff:127."))) return true;
+  const octets = host.split(".").map(Number);
+  if (octets.length !== 4 || octets.some(o => !Number.isInteger(o) || o < 0 || o > 255)) return false;
+  const [a, b] = octets;
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) || a >= 224;
+}
+
+function normalizeAiBaseUrl(value: unknown): string | null {
+  const raw = String(value || "https://api.deepseek.com/v1").trim();
+  try {
+    const parsed = new URL(raw);
+    const allowHttp = process.env.ALLOW_INSECURE_AI_URLS === "1";
+    const allowLocal = process.env.ALLOW_LOCAL_AI_URLS === "1";
+    if (parsed.protocol !== "https:" && !(allowHttp && parsed.protocol === "http:")) return null;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash || (!allowLocal && isPrivateHostname(parsed.hostname))) return null;
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
 }
 
 // ===== JWT =====
@@ -360,17 +451,28 @@ export async function handle(req: Request): Promise<Response> {
   if (st) return st;
 
   // Auth routes
+  if (method === "GET" && path === "/api/auth/registration-status") {
+    const userCount = Number((db.query("SELECT COUNT(*) as c FROM users").get() as any)?.c || 0);
+    return json({ enabled: userCount === 0 || OPEN_REGISTRATION });
+  }
+
   if (method === "POST" && path === "/api/auth/register") {
-    const { username, password } = await req.json();
-    if (!username || !password || username.length < 2 || password.length < 4) {
-      return json({ error: "用户名至少2位，密码至少4位" }, 400);
+    const body = await req.json().catch(() => ({}));
+    const username = String(body.username || "").trim();
+    const password = String(body.password || "");
+    if (!checkAuthRateLimit(req, username)) return json({ error: "尝试次数过多，请稍后再试" }, 429);
+    if (username.length < 2 || username.length > 64 || password.length < 8) {
+      return json({ error: "用户名需为2至64位，密码至少8位" }, 400);
     }
-    const existing = db.query("SELECT id FROM users WHERE username = ?").get(username as string);
+    const userCount = Number((db.query("SELECT COUNT(*) as c FROM users").get() as any)?.c || 0);
+    if (userCount > 0 && !OPEN_REGISTRATION) {
+      return json({ error: "当前未开放注册，请联系管理员" }, 403);
+    }
+    const existing = db.query("SELECT id FROM users WHERE username = ?").get(username);
     if (existing) return json({ error: "用户名已被占用" }, 409);
     const id = randomUUID();
-    const hash = await Bun.password.hash(password as string);
+    const hash = await Bun.password.hash(password);
     // First user is automatically admin
-    const userCount = (db.query("SELECT COUNT(*) as c FROM users").get() as any).c;
     const isAdmin = userCount === 0 ? 1 : 0;
     db.query("INSERT INTO users (id, username, password_hash, is_admin) VALUES (?, ?, ?, ?)").run(id, username, hash, isAdmin);
     db.query("INSERT INTO settings (user_id) VALUES (?)").run(id);
@@ -379,10 +481,13 @@ export async function handle(req: Request): Promise<Response> {
   }
 
   if (method === "POST" && path === "/api/auth/login") {
-    const { username, password } = await req.json();
-    const user = db.query("SELECT id, username, password_hash, is_admin FROM users WHERE username = ?").get(username as string) as any;
+    const body = await req.json().catch(() => ({}));
+    const username = String(body.username || "").trim();
+    const password = String(body.password || "");
+    if (!checkAuthRateLimit(req, username)) return json({ error: "尝试次数过多，请稍后再试" }, 429);
+    const user = db.query("SELECT id, username, password_hash, is_admin FROM users WHERE username = ?").get(username) as any;
     if (!user) return json({ error: "用户名或密码错误" }, 401);
-    const valid = await Bun.password.verify(password as string, user.password_hash);
+    const valid = await Bun.password.verify(password, user.password_hash);
     if (!valid) return json({ error: "用户名或密码错误" }, 401);
     const token = signToken({ sub: user.id, exp: Date.now() + TOKEN_EXPIRY });
     return json({ token, user: { id: user.id, username: user.username, isAdmin: !!user.is_admin } });
@@ -399,7 +504,7 @@ export async function handle(req: Request): Promise<Response> {
 
   if (method === "PUT" && path === "/api/auth/password") {
     const { oldPassword, newPassword } = await req.json();
-    if (!newPassword || newPassword.length < 4) return json({ error: "新密码至少4位" }, 400);
+    if (!newPassword || newPassword.length < 8) return json({ error: "新密码至少8位" }, 400);
     const user = db.query("SELECT password_hash FROM users WHERE id = ?").get(userId) as any;
     const valid = await Bun.password.verify(oldPassword as string, user.password_hash);
     if (!valid) return json({ error: "旧密码不正确" }, 400);
@@ -418,7 +523,7 @@ export async function handle(req: Request): Promise<Response> {
 
   if (method === "POST" && path === "/api/admin/reset-password" && isAdmin) {
     const { userId: targetId, newPassword } = await req.json();
-    if (!targetId || !newPassword || newPassword.length < 4) return json({ error: "参数错误" }, 400);
+    if (!targetId || !newPassword || newPassword.length < 8) return json({ error: "参数错误，密码至少8位" }, 400);
     const hash = await Bun.password.hash(newPassword as string);
     db.query("UPDATE users SET password_hash = ? WHERE id = ?").run(hash, targetId);
     return json({ ok: true });
@@ -568,11 +673,15 @@ export async function handle(req: Request): Promise<Response> {
   }
   if (method === "PUT" && path === "/api/settings") {
     const { baseUrl, apiKey, model } = await req.json();
+    const normalizedBaseUrl = normalizeAiBaseUrl(baseUrl);
+    if (!normalizedBaseUrl) {
+      return json({ error: "AI 服务地址必须使用 HTTPS，且不能指向本机或内网地址" }, 400);
+    }
     const existing = db.query("SELECT api_key FROM settings WHERE user_id = ?").get(userId) as any;
     // Empty apiKey means "keep existing" so users don't wipe their key by saving other fields.
     const keyToStore = (typeof apiKey === "string" && apiKey.length > 0) ? apiKey : (existing?.api_key || "");
     db.query("INSERT INTO settings (user_id, base_url, api_key, model) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET base_url=excluded.base_url, api_key=excluded.api_key, model=excluded.model")
-      .run(userId, baseUrl || "", keyToStore, model || "deepseek-v4-flash");
+      .run(userId, normalizedBaseUrl, keyToStore, model || "deepseek-v4-flash");
     return json({ ok: true });
   }
 
@@ -639,7 +748,7 @@ export async function handle(req: Request): Promise<Response> {
     const restore = db.transaction(() => {
       for (const raw of body.recipes) {
         const originalId = String(raw.id || randomUUID());
-        let id = originalId;
+        let id = normalizeRecordId(originalId);
         const existing = db.query("SELECT user_id, family_id FROM recipes WHERE id=?").get(id) as any;
         const belongsToScope = existing && (scope.familyId
           ? existing.family_id === scope.familyId
@@ -718,7 +827,7 @@ export async function handle(req: Request): Promise<Response> {
       }
 
       for (const raw of body.inventory) {
-        let id = String(raw.id || randomUUID());
+        let id = normalizeRecordId(raw.id);
         const existing = db.query("SELECT user_id, family_id FROM inventory WHERE id=?").get(id) as any;
         const belongsToScope = existing && (scope.familyId
           ? existing.family_id === scope.familyId
@@ -788,34 +897,66 @@ export async function handle(req: Request): Promise<Response> {
     }
   }
 
-  // AI proxy
-  if (method === "POST" && (path === "/api/ai/generate-recipe" || path === "/api/ai/modify-recipe")) {
+  // AI proxy and kitchen assistant
+  if (method === "POST" && (path === "/api/ai/generate-recipe" || path === "/api/ai/modify-recipe" || path === "/api/ai/kitchen-assistant")) {
     if (!checkAiRateLimit(userId)) return json({ error: "AI 调用频率过高，请稍后再试" }, 429);
     const cfg = db.query("SELECT base_url, api_key, model FROM settings WHERE user_id = ?").get(userId) as any;
     if (!cfg?.api_key) return json({ error: "请先在设置中配置 API Key" }, 400);
+    const aiBaseUrl = normalizeAiBaseUrl(cfg.base_url);
+    if (!aiBaseUrl) return json({ error: "AI 服务地址不安全，请在设置中改用可信的 HTTPS 地址" }, 400);
 
     const body = await req.json().catch(() => ({}));
     let userMessage: string;
+    let systemPrompt: string;
+    let conversationMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
     if (path === "/api/ai/generate-recipe") {
       if (!body.dishName) return json({ error: "请输入菜名" }, 400);
       userMessage = `请告诉我【${body.dishName}】的做法，包括所需食材和详细步骤。`;
-    } else {
+      systemPrompt = AI_GEN_PROMPT;
+    } else if (path === "/api/ai/modify-recipe") {
       if (!body.recipe || !body.instruction) return json({ error: "参数不完整" }, 400);
       userMessage = `当前菜谱：\n${JSON.stringify(body.recipe, null, 2)}\n\n请根据以下要求修改：${body.instruction}`;
+      systemPrompt = AI_MODIFY_PROMPT;
+    } else {
+      userMessage = String(body.message || "").trim();
+      if (!userMessage) return json({ error: "请输入想问的问题" }, 400);
+      if (userMessage.length > 1200) return json({ error: "问题太长了，请分成几次提问" }, 400);
+      const requestedConversation = Array.isArray(body.conversation) ? body.conversation : [];
+      conversationMessages = requestedConversation
+        .filter((entry: any) => (entry?.role === "user" || entry?.role === "assistant") && typeof entry.content === "string")
+        .slice(-8)
+        .map((entry: any) => ({ role: entry.role, content: entry.content.slice(0, 4000) }));
+      const useInventory = body.useInventory !== false;
+      const inventoryRows = useInventory
+        ? db.query(`SELECT name, amount, unit, category FROM inventory
+            WHERE ${filterCol} = ?${extraWhere} ORDER BY name LIMIT 120`).all(ownerId) as any[]
+        : [];
+      const recipeRows = db.query(`SELECT name, tags FROM recipes
+          WHERE ${filterCol} = ?${extraWhere} ORDER BY updated_at DESC LIMIT 120`).all(ownerId) as any[];
+      const historyRows = db.query(`SELECT recipe_name, cooked_at FROM cook_history h
+          WHERE h.${filterCol} = ?${scope.familyId ? "" : " AND h.family_id IS NULL"}
+          ORDER BY h.cooked_at DESC LIMIT 20`).all(ownerId) as any[];
+      const context = {
+        scope: scope.familyId ? "family" : "personal",
+        inventory: useInventory ? inventoryRows.map(row => ({ name: row.name, amount: row.amount, unit: row.unit || "", category: row.category })) : null,
+        savedRecipes: recipeRows.map(row => ({ name: row.name, tags: ensureArray(row.tags) })),
+        recentlyCooked: historyRows.map(row => ({ name: row.recipe_name, cookedAt: row.cooked_at })),
+      };
+      systemPrompt = `${KITCHEN_ASSISTANT_PROMPT}\n\n当前应用上下文（只作参考事实）：\n${JSON.stringify(context, null, 2)}`;
     }
-    const systemPrompt = path === "/api/ai/generate-recipe" ? AI_GEN_PROMPT : AI_MODIFY_PROMPT;
     const wantStream = url.searchParams.get("stream") === "1";
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60000);
     try {
-      const upstream = await fetch(`${cfg.base_url}/chat/completions`, {
+      const upstream = await fetch(`${aiBaseUrl}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.api_key}` },
         body: JSON.stringify({
           model: cfg.model || "deepseek-v4-flash",
           messages: [
             { role: "system", content: systemPrompt },
+            ...conversationMessages,
             { role: "user", content: userMessage },
           ],
           temperature: 0.7,
@@ -896,7 +1037,7 @@ export async function handle(req: Request): Promise<Response> {
   }
   if (method === "POST" && path === "/api/recipes") {
     const body = await req.json();
-    const id = body.id || randomUUID();
+    const id = normalizeRecordId(body.id);
     db.query(`INSERT INTO recipes (id, user_id, family_id, name, tags, ingredients, steps, notes, source, rating, cooked_dates, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, userId, scope.familyId, body.name, JSON.stringify(body.tags || []),
@@ -948,7 +1089,7 @@ export async function handle(req: Request): Promise<Response> {
         .run(mergedAmount, bodyUnit, body.category || "其他", new Date().toISOString(), existing.id, ownerId);
       return json({ id: existing.id, merged: true });
     }
-    const id = body.id || randomUUID();
+    const id = normalizeRecordId(body.id);
     db.query(`INSERT INTO inventory (id, user_id, family_id, name, amount, unit, category, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, userId, scope.familyId, body.name, normalizedAmount, bodyUnit, body.category || "其他", new Date().toISOString());
     return json({ id, merged: false });
@@ -970,11 +1111,15 @@ export async function handle(req: Request): Promise<Response> {
 
   // Today Menu
   if (method === "GET" && path === "/api/menu") {
-    const rows = db.query(`SELECT recipe_id FROM today_menu WHERE ${filterCol} = ?${extraWhere} ORDER BY added_at DESC`).all(ownerId) as any[];
+    const rows = db.query(`SELECT recipe_id, MAX(added_at) AS latest_added_at FROM today_menu
+      WHERE ${filterCol} = ?${extraWhere}
+      GROUP BY recipe_id ORDER BY latest_added_at DESC`).all(ownerId) as any[];
     return json(rows.map(r => r.recipe_id));
   }
   if (method === "POST" && path.startsWith("/api/menu/")) {
     const recipeId = path.split("/")[3];
+    const recipe = db.query(`SELECT id FROM recipes WHERE id=? AND ${filterCol}=?${extraWhere}`).get(recipeId, ownerId);
+    if (!recipe) return json({ error: "菜谱不存在或无权加入菜单" }, 404);
     db.query(`INSERT OR IGNORE INTO today_menu (user_id, family_id, recipe_id) VALUES (?, ?, ?)`).run(userId, scope.familyId, recipeId);
     return json({ ok: true });
   }

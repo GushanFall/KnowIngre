@@ -23,11 +23,18 @@ test("migrates legacy cooked_dates without modifying or duplicating them", () =>
       notes TEXT DEFAULT '', source TEXT DEFAULT 'manual', rating INTEGER DEFAULT 0,
       cooked_dates TEXT DEFAULT '[]', created_at TEXT, updated_at TEXT
     );
+    CREATE TABLE today_menu (
+      user_id TEXT, family_id TEXT, recipe_id TEXT, added_at TEXT,
+      PRIMARY KEY (user_id, recipe_id)
+    );
     INSERT INTO users (id, username, password_hash) VALUES ('legacy-user', '旧用户', 'unused');
     INSERT INTO families (id, name, invite_code) VALUES ('old-family', '旧家庭', 'old-code');
     INSERT INTO recipes (id, user_id, family_id, name, cooked_dates) VALUES
       ('legacy-personal', 'legacy-user', NULL, '旧私房菜', '["2024-01-01T10:00:00.000Z","2024-02-02T10:00:00.000Z"]'),
       ('legacy-family', 'legacy-user', 'old-family', '旧家庭菜', '["2024-03-03T10:00:00.000Z"]');
+    INSERT INTO today_menu (user_id, family_id, recipe_id, added_at) VALUES
+      ('legacy-user', 'old-family', 'legacy-family', '2024-03-03T09:00:00.000Z'),
+      ('another-member', 'old-family', 'legacy-family', '2024-03-03T10:00:00.000Z');
   `);
   legacy.close();
 
@@ -49,5 +56,9 @@ test("migrates legacy cooked_dates without modifying or duplicating them", () =>
   const original = migrated.query("SELECT cooked_dates FROM recipes WHERE id='legacy-personal'").get() as any;
   expect(JSON.parse(original.cooked_dates)).toEqual(["2024-01-01T10:00:00.000Z", "2024-02-02T10:00:00.000Z"]);
   expect((migrated.query("PRAGMA integrity_check").get() as any).integrity_check).toBe("ok");
+  const familyMenu = migrated.query("SELECT family_id, recipe_id, COUNT(*) AS count FROM today_menu GROUP BY family_id, recipe_id").all() as any[];
+  expect(familyMenu).toEqual([{ family_id: "old-family", recipe_id: "legacy-family", count: 1 }]);
+  const menuIndex = migrated.query("PRAGMA index_list(today_menu)").all() as any[];
+  expect(menuIndex.some((index: any) => index.name === "idx_today_menu_family_recipe" && index.unique === 1)).toBe(true);
   migrated.close();
 });

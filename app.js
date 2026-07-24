@@ -104,7 +104,7 @@ function uid() {
 }
 
 function scoped(path) {
-  if (currentScope === 'family' && (path.startsWith('/api/recipes') || path.startsWith('/api/inventory') || path.startsWith('/api/menu') || path.startsWith('/api/cook') || path.startsWith('/api/history') || path.startsWith('/api/unit-conversions') || path.startsWith('/api/import'))) {
+  if (currentScope === 'family' && (path.startsWith('/api/recipes') || path.startsWith('/api/inventory') || path.startsWith('/api/menu') || path.startsWith('/api/cook') || path.startsWith('/api/history') || path.startsWith('/api/unit-conversions') || path.startsWith('/api/import') || path.startsWith('/api/ai/kitchen-assistant'))) {
     const sep = path.includes('?') ? '&' : '?';
     return path + sep + 'scope=family';
   }
@@ -142,6 +142,9 @@ let invFilterCategory = 'all';
 let historyRange = '30';
 let historyYear = new Date().getFullYear();
 let selectedHistoryDate = null;
+const kitchenConversations = { personal: [], family: [] };
+let kitchenAssistantBusy = false;
+let kitchenUseInventory = true;
 
 // ===== Toast Notifications =====
 function showToast(message, type) {
@@ -307,7 +310,7 @@ function renderHistory() {
     const week = Math.floor((yearStart.getDay() + dayIndex) / 7) + 1;
     const weekday = date.getDay() + 1;
     const label = `${date.getMonth() + 1}月${date.getDate()}日，${count ? `做了 ${count} 道菜` : '没有记录'}`;
-    heatCells.push(`<button type="button" class="history-heat-cell level-${level}${selectedHistoryDate === key ? ' selected' : ''}" style="grid-column:${week};grid-row:${weekday}" data-history-date="${key}" aria-label="${label}" title="${label}"><span>${count || ''}</span></button>`);
+    heatCells.push(`<button type="button" class="history-heat-cell level-${level}${selectedHistoryDate === key ? ' selected' : ''}" style="grid-column:${week};grid-row:${weekday}" data-history-date="${escAttr(key)}" aria-label="${escAttr(label)}" title="${escAttr(label)}"><span>${count || ''}</span></button>`);
   }
   const monthLabels = Array.from({ length: 12 }, (_, month) => {
     const date = new Date(historyYear, month, 1);
@@ -446,6 +449,116 @@ document.getElementById('historyContent').addEventListener('click', async event 
   }
 });
 
+// ===== Kitchen Assistant =====
+function formatKitchenMessage(value) {
+  const safe = esc(String(value ?? ''));
+  return safe.split('\n').map(line => {
+    if (!line) return '<div class="kitchen-message-blank"></div>';
+    const content = line
+      .replace(/^\s*#{1,3}\s+/, '')
+      .replace(/^\s*[-*]\s+/, '• ')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    return `<div>${content}</div>`;
+  }).join('');
+}
+
+function renderKitchenAssistant() {
+  const shell = document.getElementById('kitchenAssistant');
+  const messagesEl = document.getElementById('kitchenMessages');
+  const scopeLabel = document.getElementById('kitchenScopeLabel');
+  const inventoryHint = document.getElementById('kitchenInventoryHint');
+  const checkbox = document.getElementById('kitchenUseInventory');
+  const messages = kitchenConversations[currentScope];
+  const lastKitchenMessage = messages[messages.length - 1];
+  const waitingForFirstChunk = kitchenAssistantBusy && lastKitchenMessage?.role === 'assistant' && !lastKitchenMessage?.content;
+  const visibleMessages = waitingForFirstChunk ? messages.slice(0, -1) : messages;
+  const inventoryCount = getData().inventory.length;
+  shell.classList.toggle('is-busy', kitchenAssistantBusy);
+  document.getElementById('btnKitchenSend').disabled = kitchenAssistantBusy;
+  scopeLabel.textContent = currentScope === 'family' ? '家庭范围' : '个人范围';
+  checkbox.checked = kitchenUseInventory;
+  inventoryHint.textContent = kitchenUseInventory
+    ? `会参考当前 ${inventoryCount} 种库存食材`
+    : '本次对话不读取库存详情';
+  const welcome = `<div class="kitchen-welcome"><div class="kitchen-welcome-mark">✦</div><strong>想问什么都可以</strong><p>可以问“现在能做什么”，也可以只问某种食材有哪些做法。</p></div>`;
+  const messageHtml = visibleMessages.map(message => `<div class="kitchen-message kitchen-message--${message.role}">
+    <div class="kitchen-message-label">${message.role === 'user' ? '你' : '厨房灵感'}</div>
+    <div class="kitchen-message-bubble">${formatKitchenMessage(message.content)}</div>
+  </div>`).join('');
+  const typing = waitingForFirstChunk ? `<div class="kitchen-message kitchen-message--assistant kitchen-message--typing"><div class="kitchen-message-label">厨房灵感</div><div class="kitchen-message-bubble"><span class="kitchen-typing-dot"></span><span class="kitchen-typing-dot"></span><span class="kitchen-typing-dot"></span></div></div>` : '';
+  messagesEl.innerHTML = messages.length ? messageHtml + typing : welcome + typing;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function openKitchenAssistant() {
+  const shell = document.getElementById('kitchenAssistant');
+  shell.hidden = false;
+  renderKitchenAssistant();
+  requestAnimationFrame(() => document.getElementById('kitchenInput').focus());
+}
+
+function closeKitchenAssistant() {
+  document.getElementById('kitchenAssistant').hidden = true;
+}
+
+async function sendKitchenMessage(rawMessage) {
+  const message = String(rawMessage || '').trim();
+  if (!message || kitchenAssistantBusy) return;
+  const conversation = kitchenConversations[currentScope];
+  const previousMessages = conversation.slice(-8).map(item => ({ role: item.role, content: item.content }));
+  conversation.push({ role: 'user', content: message });
+  conversation.push({ role: 'assistant', content: '' });
+  kitchenAssistantBusy = true;
+  document.getElementById('kitchenInput').value = '';
+  renderKitchenAssistant();
+  try {
+    const content = await streamAiContent(scoped('/api/ai/kitchen-assistant'), {
+      message,
+      useInventory: kitchenUseInventory,
+      conversation: previousMessages,
+    }, partial => {
+      conversation[conversation.length - 1].content = partial;
+      renderKitchenAssistant();
+    });
+    conversation[conversation.length - 1].content = content || '暂时没有得到回复，请换个问法再试试。';
+  } catch (error) {
+    conversation[conversation.length - 1].content = `暂时无法回答：${error.message || '请求失败'}`;
+    showToast('厨房灵感暂时不可用', 'error');
+  } finally {
+    kitchenAssistantBusy = false;
+    renderKitchenAssistant();
+  }
+}
+
+document.getElementById('btnKitchenAssistant').addEventListener('click', openKitchenAssistant);
+document.querySelectorAll('[data-kitchen-close]').forEach(button => button.addEventListener('click', closeKitchenAssistant));
+document.getElementById('kitchenUseInventory').addEventListener('change', event => {
+  kitchenUseInventory = event.target.checked;
+  renderKitchenAssistant();
+});
+document.getElementById('btnKitchenClear').addEventListener('click', () => {
+  if (kitchenAssistantBusy) return;
+  kitchenConversations[currentScope].length = 0;
+  renderKitchenAssistant();
+});
+document.getElementById('kitchenComposer').addEventListener('submit', event => {
+  event.preventDefault();
+  sendKitchenMessage(document.getElementById('kitchenInput').value);
+});
+document.getElementById('kitchenInput').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    sendKitchenMessage(event.target.value);
+  }
+});
+document.getElementById('kitchenQuickPrompts').addEventListener('click', event => {
+  const button = event.target.closest('[data-kitchen-prompt]');
+  if (button) sendKitchenMessage(button.dataset.kitchenPrompt);
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !document.getElementById('kitchenAssistant').hidden) closeKitchenAssistant();
+});
+
 // ===== Settings =====
 function switchSettingsTab(name) {
   document.querySelectorAll('.settings-tab').forEach(t => t.classList.toggle('active', t.dataset.stab === name));
@@ -484,7 +597,7 @@ document.getElementById('btnSettings').addEventListener('click', async () => {
             <span style="font-weight:600;font-size:0.9rem">${esc(u.username)}</span>
             ${u.is_admin ? '<span style="font-size:0.7rem;background:var(--clay);color:#fff;padding:1px 8px;border-radius:10px;margin-left:6px">管理员</span>' : ''}
           </div>
-          <button class="btn btn-sm" data-admin-reset="${u.id}" style="font-size:0.75rem;color:var(--chili)">重置密码</button>
+          <button class="btn btn-sm" data-admin-reset="${escAttr(u.id)}" style="font-size:0.75rem;color:var(--chili)">重置密码</button>
         </div>
       `).join('');
     } else {
@@ -526,6 +639,7 @@ document.getElementById('scopeToggle').addEventListener('click', async (e) => {
       void activePanel.offsetWidth;
       activePanel.classList.add('scope-fade-in');
     }
+    if (!document.getElementById('kitchenAssistant').hidden) renderKitchenAssistant();
     showToast(currentScope === 'family' ? '已切换到家庭数据' : '已切换到个人数据', 'success');
   } finally {
     toggle.dataset.loading = '0';
@@ -626,7 +740,7 @@ document.getElementById('passwordForm').addEventListener('submit', async (e) => 
   e.preventDefault();
   const oldPw = document.getElementById('pwOld').value;
   const newPw = document.getElementById('pwNew').value;
-  if (newPw.length < 4) { showToast('新密码至少4位', 'error'); return; }
+  if (newPw.length < 8) { showToast('新密码至少8位', 'error'); return; }
   const status = document.getElementById('pwStatus');
   status.textContent = '⏳';
   try {
@@ -644,8 +758,8 @@ document.getElementById('adminUserList').addEventListener('click', async (e) => 
   const btn = e.target.closest('[data-admin-reset]');
   if (!btn) return;
   const userId = btn.dataset.adminReset;
-  const newPw = prompt('输入新密码（至少4位）：');
-  if (!newPw || newPw.length < 4) { showToast('密码至少4位', 'error'); return; }
+  const newPw = prompt('输入新密码（至少8位）：');
+  if (!newPw || newPw.length < 8) { showToast('密码至少8位', 'error'); return; }
   try {
     await apiFetch('/api/admin/reset-password', { method: 'POST', body: { userId, newPassword: newPw } });
     showToast('密码已重置', 'success');
@@ -755,8 +869,8 @@ function recipeCardHtml(r, ctx) {
     : '尚未做过';
   const missing = countMissingIngredients(r.ingredients, ctx.lookup);
   return `
-    <div class="recipe-card${inMenu ? ' in-menu' : ''}" data-id="${r.id}">
-      ${inMenu ? '<button class="card-menu-badge" data-menu-remove-card="' + r.id + '" title="点击从今日菜单移除">' + iconSvg('menu', 'icon-sm') + ' 今日菜单 ' + iconSvg('xmark', 'icon-sm') + '</button>' : ''}
+    <div class="recipe-card${inMenu ? ' in-menu' : ''}" data-id="${escAttr(r.id)}">
+      ${inMenu ? '<button class="card-menu-badge" data-menu-remove-card="' + escAttr(r.id) + '" title="点击从今日菜单移除">' + iconSvg('menu', 'icon-sm') + ' 今日菜单 ' + iconSvg('xmark', 'icon-sm') + '</button>' : ''}
       <div class="card-name">${esc(r.name)}</div>
       <div class="card-tags">${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
       <div class="card-meta">
@@ -771,10 +885,10 @@ function recipeCardHtml(r, ctx) {
       <div class="card-footer">
         <span class="card-hint">点击查看详情 →</span>
         <div style="display:flex;gap:4px;align-items:center">
-          <button class="btn btn-xs" data-sync-recipe="${r.id}" title="${ctx.scope === 'family' ? '同步到个人' : '同步到家庭'}" style="border-color:var(--stone-dark);color:var(--text-muted)">${iconSvg('sync', 'icon-sm')}</button>
+          <button class="btn btn-xs" data-sync-recipe="${escAttr(r.id)}" title="${ctx.scope === 'family' ? '同步到个人' : '同步到家庭'}" style="border-color:var(--stone-dark);color:var(--text-muted)">${iconSvg('sync', 'icon-sm')}</button>
           ${inMenu
-            ? `<button class="btn btn-xs" data-menu-remove-card="${r.id}" style="border-color:var(--bloom);color:var(--bloom);background:var(--bloom-ghost)">${iconSvg('menu', 'icon-sm')} 移出</button>`
-            : `<button class="btn btn-xs btn-primary" data-menu-add="${r.id}">${iconSvg('plus', 'icon-sm')} 加入</button>`
+            ? `<button class="btn btn-xs" data-menu-remove-card="${escAttr(r.id)}" style="border-color:var(--bloom);color:var(--bloom);background:var(--bloom-ghost)">${iconSvg('menu', 'icon-sm')} 移出</button>`
+            : `<button class="btn btn-xs btn-primary" data-menu-add="${escAttr(r.id)}">${iconSvg('plus', 'icon-sm')} 加入</button>`
           }
         </div>
       </div>
@@ -858,7 +972,7 @@ function renderTagFilters(recipes) {
   const container = document.getElementById('tagFilters');
   if (allTags.length === 0) { container.innerHTML = ''; return; }
   container.innerHTML = allTags.map(t =>
-    `<span class="tag-filter${t === currentFilterTag ? ' active' : ''}" data-tag="${esc(t)}">${esc(t)}</span>`
+    `<span class="tag-filter${t === currentFilterTag ? ' active' : ''}" data-tag="${escAttr(t)}">${esc(t)}</span>`
   ).join('');
 }
 
@@ -1063,8 +1177,8 @@ function openRecipeModal(id) {
   const ings = recipe?.ingredients || [{ name: '', amount: '', optional: false }];
   ingDiv.innerHTML = ings.map((ing, i) => `
     <div class="ingredient-row">
-      <input type="text" placeholder="食材名称" value="${esc(ing.name)}" data-ing-name>
-      <input type="text" placeholder="用量 (如200g)" value="${esc(ing.amount)}" data-ing-amount style="max-width:150px">
+      <input type="text" placeholder="食材名称" value="${escAttr(ing.name)}" data-ing-name>
+      <input type="text" placeholder="用量 (如200g)" value="${escAttr(ing.amount)}" data-ing-amount style="max-width:150px">
       <label style="font-weight:normal;display:flex;align-items:center;gap:4px;margin:0;white-space:nowrap">
         <input type="checkbox" ${ing.optional ? 'checked' : ''} data-ing-opt> 可选
       </label>
@@ -1188,8 +1302,8 @@ document.getElementById('btnAiGenFill').addEventListener('click', async () => {
     // Ingredients
     ingDiv.innerHTML = (recipe.ingredients || []).map((ing, i) => `
       <div class="ingredient-row reveal-row" style="animation-delay:${i * 0.05}s">
-        <input type="text" placeholder="食材名称" value="${esc(ing.name)}" data-ing-name>
-        <input type="text" placeholder="用量 (如200g)" value="${esc(ing.amount)}" data-ing-amount style="max-width:150px">
+        <input type="text" placeholder="食材名称" value="${escAttr(ing.name)}" data-ing-name>
+        <input type="text" placeholder="用量 (如200g)" value="${escAttr(ing.amount)}" data-ing-amount style="max-width:150px">
         <label style="font-weight:normal;display:flex;align-items:center;gap:4px;margin:0;white-space:nowrap">
           <input type="checkbox" ${ing.optional ? 'checked' : ''} data-ing-opt> 可选
         </label>
@@ -1257,8 +1371,8 @@ document.getElementById('btnAiModify').addEventListener('click', async () => {
     const ings = updated.ingredients?.length ? updated.ingredients : current.ingredients;
     ingDiv.innerHTML = ings.map((ing, i) => `
       <div class="ingredient-row reveal-row" style="animation-delay:${i * 0.05}s">
-        <input type="text" placeholder="食材名称" value="${esc(ing.name)}" data-ing-name>
-        <input type="text" placeholder="用量 (如200g)" value="${esc(ing.amount)}" data-ing-amount style="max-width:150px">
+        <input type="text" placeholder="食材名称" value="${escAttr(ing.name)}" data-ing-name>
+        <input type="text" placeholder="用量 (如200g)" value="${escAttr(ing.amount)}" data-ing-amount style="max-width:150px">
         <label style="font-weight:normal;display:flex;align-items:center;gap:4px;margin:0;white-space:nowrap">
           <input type="checkbox" ${ing.optional ? 'checked' : ''} data-ing-opt> 可选
         </label>
@@ -1488,7 +1602,8 @@ document.getElementById('btnDeleteRecipe').addEventListener('click', async () =>
 // ===== AI Generate (used in recipe modal) =====
 
 async function streamAiContent(path, body, onProgress) {
-  const resp = await fetch(API_BASE + path + '?stream=1', {
+  const separator = path.includes('?') ? '&' : '?';
+  const resp = await fetch(API_BASE + path + separator + 'stream=1', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1567,9 +1682,9 @@ function renderInventory() {
   const dismissedIds = sessionStorage.getItem('knowingre_low_dismissed') || '';
   const bannerHidden = currentIds && currentIds === dismissedIds;
   bannerDiv.innerHTML = lowItems.length > 0 && !bannerHidden ? `
-    <div class="low-stock-banner" role="status" data-ids="${esc(currentIds)}">
+    <div class="low-stock-banner" role="status" data-ids="${escAttr(currentIds)}">
       <span class="low-stock-banner__label">⚠ 低库存 (${lowItems.length})</span>
-      ${lowItems.map(i => `<button type="button" data-lowstock-name="${i.id}">${esc(i.name)}</button>`).join('')}
+      ${lowItems.map(i => `<button type="button" data-lowstock-name="${escAttr(i.id)}">${esc(i.name)}</button>`).join('')}
       <button type="button" class="low-stock-banner__close" data-lowstock-dismiss aria-label="收起">×</button>
     </div>` : '';
 
@@ -1585,8 +1700,8 @@ function renderInventory() {
         <div class="inv-meta">
           <span class="inv-category">${esc(item.category || '其他')}${low ? '<span class="low-badge">低</span>' : ''}</span>
           <span class="inv-actions">
-            <button class="inv-edit-btn" data-inv-edit="${item.id}">编辑</button>
-            <button class="inv-del-btn" data-inv-del="${item.id}">删除</button>
+            <button class="inv-edit-btn" data-inv-edit="${escAttr(item.id)}">编辑</button>
+            <button class="inv-del-btn" data-inv-del="${escAttr(item.id)}">删除</button>
           </span>
         </div>
         <div class="inv-info">
@@ -1616,7 +1731,7 @@ function renderInventoryChips(inventory) {
     ...CAT_ORDER.filter(c => counts[c]).map(c => ({ key: c, label: `${c} ${counts[c]}` })),
   ];
   chipsDiv.innerHTML = chips.map(c => `
-    <button type="button" class="inv-chip${invFilterCategory === c.key ? ' inv-chip--active' : ''}${c.danger ? ' inv-chip--danger' : ''}" data-inv-filter="${c.key}">${esc(c.label)}</button>
+    <button type="button" class="inv-chip${invFilterCategory === c.key ? ' inv-chip--active' : ''}${c.danger ? ' inv-chip--danger' : ''}" data-inv-filter="${escAttr(c.key)}">${esc(c.label)}</button>
   `).join('');
 }
 
@@ -1779,8 +1894,8 @@ function renderMatchableRecipes() {
         ${missingHtml}
         ${canMake
           ? (inMenu
-              ? `<button class="btn btn-xs" data-menu-remove-card="${recipe.id}" style="margin-top:10px;border-color:var(--bloom);color:var(--bloom);background:var(--bloom-ghost)">${iconSvg('menu', 'icon-sm')} 移出菜单</button>`
-              : `<button class="btn btn-xs btn-primary" data-menu-add="${recipe.id}" style="margin-top:10px">${iconSvg('plus', 'icon-sm')} 加入菜单</button>`)
+              ? `<button class="btn btn-xs" data-menu-remove-card="${escAttr(recipe.id)}" style="margin-top:10px;border-color:var(--bloom);color:var(--bloom);background:var(--bloom-ghost)">${iconSvg('menu', 'icon-sm')} 移出菜单</button>`
+              : `<button class="btn btn-xs btn-primary" data-menu-add="${escAttr(recipe.id)}" style="margin-top:10px">${iconSvg('plus', 'icon-sm')} 加入菜单</button>`)
           : ''}
       </div>
     `;
@@ -1864,7 +1979,7 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
         </div>` : ''}`;
     }
     return `
-    <div class="done-item" data-name="${esc(m.name)}" data-inventory-id="${esc(m.inventoryId)}">
+    <div class="done-item" data-name="${escAttr(m.name)}" data-inventory-id="${escAttr(m.inventoryId)}">
       <div class="done-item-head">
         <span class="done-item-name">${esc(m.name)}</span>
         <span class="done-item-need">菜谱需: ${esc(m.recipeAmount || '—')}</span>
@@ -1880,8 +1995,8 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
         <label class="done-field">
           <span>用完剩余</span>
           <div class="inv-row" style="gap:4px">
-            <input type="text" class="done-remaining" value="${esc(m.remaining)}" placeholder="剩余" style="flex:1;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
-            <input type="text" class="done-unit" value="${esc(m.inventoryUnit || '')}" placeholder="单位" style="width:60px;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
+            <input type="text" class="done-remaining" value="${escAttr(m.remaining)}" placeholder="剩余" style="flex:1;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
+            <input type="text" class="done-unit" value="${escAttr(m.inventoryUnit || '')}" placeholder="单位" style="width:60px;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
           </div>
         </label>
         <label class="done-remove-cb">
@@ -2143,8 +2258,8 @@ function renderMenu() {
       ? formatRelativeDate(new Date(r.cookedDates[r.cookedDates.length - 1]))
       : '尚未做过';
     return `
-      <div class="recipe-card in-menu" data-id="${r.id}">
-        <button class="card-menu-badge" data-menu-remove-card="${r.id}" title="点击从今日菜单移除">${iconSvg('menu', 'icon-sm')} 今日菜单 ${iconSvg('xmark', 'icon-sm')}</button>
+      <div class="recipe-card in-menu" data-id="${escAttr(r.id)}">
+        <button class="card-menu-badge" data-menu-remove-card="${escAttr(r.id)}" title="点击从今日菜单移除">${iconSvg('menu', 'icon-sm')} 今日菜单 ${iconSvg('xmark', 'icon-sm')}</button>
         <div class="card-name">${esc(r.name)}</div>
         <div class="card-tags">${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
         <div class="card-meta">
@@ -2158,11 +2273,11 @@ function renderMenu() {
         <div class="card-footer">
           <span class="card-hint">点击查看详情 →</span>
           <div style="display:flex;gap:4px;align-items:center">
-            <button class="btn btn-xs" data-menu-cook="${r.id}" style="border-color:var(--herb);color:var(--herb)" title="按菜谱默认用量扣减库存">${iconSvg('cook', 'icon-sm')} 做完了</button>
-            <button class="btn btn-xs" data-menu-cook-adjust="${r.id}" title="精确调整扣减量" style="padding:4px 7px;color:var(--text-muted)">
+            <button class="btn btn-xs" data-menu-cook="${escAttr(r.id)}" style="border-color:var(--herb);color:var(--herb)" title="按菜谱默认用量扣减库存">${iconSvg('cook', 'icon-sm')} 做完了</button>
+            <button class="btn btn-xs" data-menu-cook-adjust="${escAttr(r.id)}" title="精确调整扣减量" style="padding:4px 7px;color:var(--text-muted)">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
-            <button class="btn btn-xs" data-menu-remove="${r.id}" style="border-color:var(--chili);color:var(--chili)">${iconSvg('xmark', 'icon-sm')} 移除</button>
+            <button class="btn btn-xs" data-menu-remove="${escAttr(r.id)}" style="border-color:var(--chili);color:var(--chili)">${iconSvg('xmark', 'icon-sm')} 移除</button>
           </div>
         </div>
       </div>`;
@@ -2199,7 +2314,7 @@ function renderMenu() {
           <span class="shopping-item-name">${esc(item.name)}</span>
           ${inStock
             ? `<span class="stock-tag stock-tag--have">有库存</span>`
-            : `<span class="stock-tag stock-tag--need" data-quick-add="${esc(item.name)}">待采购</span>`
+            : `<span class="stock-tag stock-tag--need" data-quick-add="${escAttr(item.name)}">待采购</span>`
           }
         </div>
         <div class="shopping-item-detail"><span class="shopping-item-stock-hint">${stockInfo}</span>${recipes}</div>

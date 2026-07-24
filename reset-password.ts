@@ -11,6 +11,10 @@ if (!username || !newPassword) {
   console.log("用法: bun run reset-password.ts <用户名> <新密码>");
   process.exit(1);
 }
+if (newPassword.length < 8) {
+  console.log("新密码至少8位");
+  process.exit(1);
+}
 
 const user = db.query("SELECT id FROM users WHERE username = ?").get(username);
 if (!user) {

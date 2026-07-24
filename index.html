@@ -139,6 +139,44 @@
     </section>
   </main>
 
+  <button type="button" class="kitchen-fab" id="btnKitchenAssistant" aria-label="打开厨房灵感">
+    <span class="kitchen-fab-icon"><svg width="18" height="18" viewBox="0 0 24 24"><path d="M12 3v3M5.6 5.6l2.1 2.1M3 12h3M5.6 18.4l2.1-2.1M18.4 18.4l-2.1-2.1M21 12h-3M18.4 5.6l-2.1 2.1M12 18v3"/><circle cx="12" cy="12" r="4"/></svg></span>
+    <span>厨房灵感</span>
+  </button>
+
+  <div class="kitchen-assistant" id="kitchenAssistant" hidden>
+    <button type="button" class="kitchen-assistant-backdrop" data-kitchen-close aria-label="关闭厨房灵感"></button>
+    <aside class="kitchen-drawer" role="dialog" aria-modal="true" aria-labelledby="kitchenAssistantTitle">
+      <div class="kitchen-drawer-header">
+        <div>
+          <h2 id="kitchenAssistantTitle">厨房灵感</h2>
+          <p><span class="kitchen-status-dot"></span><span id="kitchenScopeLabel">个人范围</span></p>
+        </div>
+        <div class="kitchen-drawer-actions">
+          <button type="button" class="btn-icon" id="btnKitchenClear" aria-label="清空对话" title="清空对话"><svg width="15" height="15" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          <button type="button" class="btn-icon" data-kitchen-close aria-label="关闭厨房灵感"><svg width="18" height="18" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+        </div>
+      </div>
+      <div class="kitchen-context-bar">
+        <label><input type="checkbox" id="kitchenUseInventory" checked> 智能参考当前库存</label>
+        <span id="kitchenInventoryHint">会根据库存给出更贴合的建议</span>
+      </div>
+      <div class="kitchen-messages" id="kitchenMessages" aria-live="polite"></div>
+      <div class="kitchen-composer-area">
+        <div class="kitchen-quick-prompts" id="kitchenQuickPrompts">
+          <button type="button" data-kitchen-prompt="现在有什么可以做？">现在有什么可以做？</button>
+          <button type="button" data-kitchen-prompt="鱼有哪些做法？">鱼有哪些做法？</button>
+          <button type="button" data-kitchen-prompt="推荐一道没做过的快手菜">推荐一道新菜</button>
+        </div>
+        <form class="kitchen-composer" id="kitchenComposer">
+          <textarea id="kitchenInput" rows="1" placeholder="问问食材、做法或菜谱…" maxlength="1200"></textarea>
+          <button type="submit" class="btn btn-primary" id="btnKitchenSend">发送</button>
+        </form>
+        <p class="kitchen-composer-hint">Enter 发送 · Shift + Enter 换行</p>
+      </div>
+    </aside>
+  </div>
+
   <footer class="status-bar">
     <span class="status-dot"></span>
     <span id="statsText">加载中...</span>
@@ -301,7 +339,7 @@
             </div>
             <div class="form-group">
               <label for="pwNew">新密码</label>
-              <input type="password" id="pwNew" required placeholder="至少4位" minlength="4">
+              <input type="password" id="pwNew" required placeholder="至少8位" minlength="8">
             </div>
             <button type="submit" class="btn btn-primary btn-full">修改密码</button>
           </form>

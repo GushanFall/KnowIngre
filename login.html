@@ -156,7 +156,7 @@
         </div>
         <div class="login-field">
           <label>密码</label>
-          <input type="password" id="regPassword" placeholder="至少4个字符" required minlength="4" autocomplete="new-password">
+          <input type="password" id="regPassword" placeholder="至少8个字符" required minlength="8" autocomplete="new-password">
         </div>
         <button type="submit" class="btn btn-primary btn-full" style="margin-top:8px">注册</button>
       </form>
@@ -170,6 +170,7 @@
     const formLogin = document.getElementById('formLogin');
     const formRegister = document.getElementById('formRegister');
     const errorEl = document.getElementById('loginError');
+    const registerTab = document.querySelector('[data-tab="register"]');
 
     // Tab switching
     document.querySelectorAll('.login-tab').forEach(tab => {
@@ -220,7 +221,7 @@
       const u = document.getElementById('regUsername').value.trim();
       const p = document.getElementById('regPassword').value;
       if (u.length < 2) { showError('用户名至少2个字符'); return; }
-      if (p.length < 4) { showError('密码至少4个字符'); return; }
+      if (p.length < 8) { showError('密码至少8个字符'); return; }
       submitAuth('/api/auth/register', u, p);
     });
 
@@ -234,6 +235,13 @@
         else { localStorage.removeItem('knowingre_token'); localStorage.removeItem('knowingre_user'); }
       }).catch(() => {});
     }
+
+    fetch(API_BASE + '/api/auth/registration-status')
+      .then(r => r.ok ? r.json() : { enabled: false })
+      .then(data => {
+        if (!data.enabled && registerTab) registerTab.style.display = 'none';
+      })
+      .catch(() => {});
   </script>
 </body>
 </html>

@@ -6,6 +6,7 @@ import { join } from "node:path";
 const testDirectory = mkdtempSync(join(tmpdir(), "knowingre-server-"));
 process.env.KNOWINGRE_DB_PATH = join(testDirectory, "data.db");
 process.env.JWT_SECRET = "integration-test-secret";
+process.env.OPEN_REGISTRATION = "1";
 
 let handle: (request: Request) => Promise<Response>;
 let token = "";
@@ -200,7 +201,95 @@ describe("cooking history API", () => {
   });
 });
 
+describe("kitchen assistant API", () => {
+  test("requires stronger passwords for new accounts", async () => {
+    const weak = await request("/api/auth/register", "POST", { username: "弱密码用户", password: "1234567" }, "");
+    expect(weak.status).toBe(400);
+  });
+
+  test("rejects private AI endpoints while accepting HTTPS providers", async () => {
+    const privateResult = await request("/api/settings", "PUT", {
+      baseUrl: "http://127.0.0.1:8080/v1", apiKey: "test-key", model: "test-model",
+    });
+    expect(privateResult.status).toBe(400);
+    const publicResult = await request("/api/settings", "PUT", {
+      baseUrl: "https://assistant.test/v1", apiKey: "test-key", model: "test-model",
+    });
+    expect(publicResult.status).toBe(200);
+  });
+
+  test("sends scoped inventory context while keeping open questions general", async () => {
+    await request("/api/settings", "PUT", {
+      baseUrl: "https://assistant.test/v1", apiKey: "test-key", model: "test-model",
+    });
+    const originalFetch = globalThis.fetch;
+    let captured: any = null;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      captured = JSON.parse(String(init?.body || "{}"));
+      return new Response(JSON.stringify({ choices: [{ message: { content: "可以清蒸、红烧，也可以煮汤。" } }] }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const result = await request("/api/ai/kitchen-assistant", "POST", {
+        message: "鱼有哪些做法？", useInventory: true,
+        conversation: [{ role: "user", content: "我想吃清淡的" }],
+      });
+      expect(result.status).toBe(200);
+      expect(result.data.content).toContain("清蒸");
+      expect(captured.messages[0].role).toBe("system");
+      expect(captured.messages[0].content).toContain("inventory");
+      expect(captured.messages[1]).toEqual({ role: "user", content: "我想吃清淡的" });
+      expect(captured.messages.at(-1)).toEqual({ role: "user", content: "鱼有哪些做法？" });
+
+      await request("/api/ai/kitchen-assistant", "POST", { message: "只介绍做法", useInventory: false });
+      const systemContext = captured.messages[0].content;
+      expect(systemContext).toContain('"inventory": null');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("rejects empty and oversized assistant questions", async () => {
+    const empty = await request("/api/ai/kitchen-assistant", "POST", { message: "" });
+    expect(empty.status).toBe(400);
+    const oversized = await request("/api/ai/kitchen-assistant", "POST", { message: "问".repeat(1201) });
+    expect(oversized.status).toBe(400);
+  });
+});
+
 describe("scope and authorization", () => {
+  test("sanitizes unsafe record IDs and prevents cross-scope menu inserts", async () => {
+    const unsafeId = `recipe\" autofocus onfocus=\"globalThis.__review=1`;
+    const created = await request("/api/recipes", "POST", {
+      id: unsafeId, name: "安全 ID 测试", ingredients: [], steps: [],
+    });
+    expect(created.status).toBe(200);
+    expect(created.data.id).not.toBe(unsafeId);
+    expect(created.data.id).toMatch(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+
+    const owner = await request("/api/auth/register", "POST", { username: "菜单所有者", password: "test1234" }, "");
+    const outsiderRecipe = await request("/api/recipes", "POST", {
+      id: "outsider-menu-recipe", name: "私人菜单菜", ingredients: [], steps: [],
+    }, owner.data.token);
+    const rejected = await request(`/api/menu/${outsiderRecipe.data.id}`, "POST", undefined, token);
+    expect(rejected.status).toBe(404);
+  });
+
+  test("deduplicates a shared family menu across members", async () => {
+    const memberA = await request("/api/auth/register", "POST", { username: "菜单家庭甲", password: "test1234" }, "");
+    const family = await request("/api/family/create", "POST", { name: "菜单去重家庭" }, memberA.data.token);
+    const memberB = await request("/api/auth/register", "POST", { username: "菜单家庭乙", password: "test1234" }, "");
+    await request("/api/family/join", "POST", { code: family.data.inviteCode }, memberB.data.token);
+    const recipe = await request("/api/recipes?scope=family", "POST", {
+      id: "shared-menu-recipe", name: "家庭共享菜", ingredients: [], steps: [],
+    }, memberA.data.token);
+    expect((await request(`/api/menu/${recipe.data.id}?scope=family`, "POST", undefined, memberA.data.token)).status).toBe(200);
+    expect((await request(`/api/menu/${recipe.data.id}?scope=family`, "POST", undefined, memberB.data.token)).status).toBe(200);
+    const menu = await request("/api/menu?scope=family", "GET", undefined, memberA.data.token);
+    expect(menu.data).toEqual([recipe.data.id]);
+  });
+
   test("keeps personal inventory separate from family inventory", async () => {
     expect((await request("/api/family/create", "POST", { name: "测试家庭" })).status).toBe(200);
     await request("/api/inventory?scope=family", "POST", {
