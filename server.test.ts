@@ -159,7 +159,17 @@ describe("cooking history API", () => {
     const recipeAfterCook = (await request("/api/recipes")).data.find((item: any) => item.id === "history-recipe");
     expect(recipeAfterCook.cookedDates).toEqual([entry.cookedAt]);
 
+    const updatedCookedAt = "2025-05-06T11:30:00.000Z";
+    expect((await request(`/api/history/${entry.id}`, "PATCH", { cookedAt: updatedCookedAt })).status).toBe(200);
+    const paged = await request(`/api/history?view=records&page=1&pageSize=5&q=${encodeURIComponent("历史测试")}&from=2025-05-06T00:00:00.000Z&to=2025-05-06T23:59:59.999Z`);
+    expect(paged.data).toMatchObject({ total: 1, page: 1, pageSize: 5, totalPages: 1 });
+    expect(paged.data.items[0]).toMatchObject({ id: entry.id, cookedAt: updatedCookedAt });
+
+    const recipeAfterTimeEdit = (await request("/api/recipes")).data.find((item: any) => item.id === "history-recipe");
+    expect(recipeAfterTimeEdit.cookedDates).toEqual([updatedCookedAt]);
+
     const outsider = await request("/api/auth/register", "POST", { username: "足迹旁观者", password: "test1234" }, "");
+    expect((await request(`/api/history/${entry.id}`, "PATCH", { cookedAt: "2025-05-07T11:30:00.000Z" }, outsider.data.token)).status).toBe(404);
     expect((await request(`/api/history/${entry.id}`, "DELETE", undefined, outsider.data.token)).status).toBe(404);
     expect((await request(`/api/history/${entry.id}`, "DELETE")).status).toBe(200);
     expect((await request("/api/history")).data.some((item: any) => item.id === entry.id)).toBe(false);
@@ -182,6 +192,59 @@ describe("cooking history API", () => {
       .toMatchObject({ recipeName: "家庭晚餐", username: "足迹家庭用户" });
     const personalHistory = await request("/api/history", "GET", undefined, familyToken);
     expect(personalHistory.data.some((item: any) => item.recipeId === "family-history-recipe")).toBe(false);
+  });
+
+  test("adds manual cooking records and keeps notes and recipe dates in sync", async () => {
+    await request("/api/recipes", "POST", {
+      id: "manual-history-recipe", name: "手动补记菜", tags: ["家常"], ingredients: [], steps: [],
+    });
+    const created = await request("/api/history", "POST", {
+      recipeId: "manual-history-recipe",
+      cookedAt: "2025-08-09T10:20:00.000Z",
+      notes: "第一次做，少放盐更合适",
+    });
+    expect(created.status).toBe(201);
+    expect(created.data).toMatchObject({
+      recipeId: "manual-history-recipe",
+      recipeName: "手动补记菜",
+      cookedAt: "2025-08-09T10:20:00.000Z",
+      notes: "第一次做，少放盐更合适",
+    });
+
+    const updated = await request(`/api/history/${created.data.id}`, "PATCH", {
+      cookedAt: "2025-08-10T11:30:00.000Z",
+      notes: "第二天补充：火候正好",
+    });
+    expect(updated.status).toBe(200);
+    const history = await request("/api/history");
+    expect(history.data.find((item: any) => item.id === created.data.id)).toMatchObject({
+      cookedAt: "2025-08-10T11:30:00.000Z",
+      notes: "第二天补充：火候正好",
+    });
+    const noteSearch = await request(`/api/history?view=records&q=${encodeURIComponent("火候正好")}`);
+    expect(noteSearch.data.items.map((item: any) => item.id)).toContain(created.data.id);
+    const recipe = (await request("/api/recipes")).data.find((item: any) => item.id === "manual-history-recipe");
+    expect(recipe.cookedDates).toEqual(["2025-08-10T11:30:00.000Z"]);
+
+    const custom = await request("/api/history", "POST", {
+      recipeName: "没有菜谱的夜宵",
+      cookedAt: "2025-08-11T12:00:00.000Z",
+      notes: "临时发挥",
+    });
+    expect(custom.status).toBe(201);
+    expect(custom.data).toMatchObject({ recipeId: null, recipeName: "没有菜谱的夜宵", notes: "临时发挥" });
+
+    await request("/api/history", "POST", {
+      recipeName: "Sort B", cookedAt: "2025-08-13T12:00:00.000Z", notes: "排序测试",
+    });
+    await request("/api/history", "POST", {
+      recipeName: "Sort A", cookedAt: "2025-08-12T12:00:00.000Z", notes: "排序测试",
+    });
+    const sortedByName = await request("/api/history?view=records&q=Sort&sort=name&pageSize=20");
+    expect(sortedByName.data).toMatchObject({ sort: "name", pageSize: 20, total: 2 });
+    expect(sortedByName.data.items.map((item: any) => item.recipeName)).toEqual(["Sort A", "Sort B"]);
+    const sortedOldest = await request("/api/history?view=records&q=Sort&sort=oldest&pageSize=20");
+    expect(sortedOldest.data.items.map((item: any) => item.recipeName)).toEqual(["Sort A", "Sort B"]);
   });
 
   test("restores history from old backups without duplicating it", async () => {

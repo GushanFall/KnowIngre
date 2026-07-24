@@ -53,11 +53,12 @@
   <main class="content">
     <!-- 今日菜单 Tab -->
     <section class="tab-panel active" id="panel-menu">
-      <div class="menu-header">
-        <h2 class="menu-title">
-          <span class="icon icon-md"><svg width="16" height="16" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="0.8" fill="currentColor"/><circle cx="4" cy="12" r="0.8" fill="currentColor"/><circle cx="4" cy="18" r="0.8" fill="currentColor"/></svg></span> 今日菜单
-        </h2>
-        <div class="flex-center gap-8">
+      <div class="page-header">
+        <div class="page-heading">
+          <h2>今日菜单</h2>
+          <p>安排今天要做的菜，并自动整理所需食材</p>
+        </div>
+        <div class="page-actions">
           <span id="menuRecipeCount" class="text-sm text-muted"></span>
           <button class="btn btn-sm btn-primary" id="btnCookAll" style="display:none"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span> 全部做完</button>
           <button class="btn btn-sm btn-danger" id="btnClearMenu" style="display:none"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span> 清空</button>
@@ -75,15 +76,23 @@
 
     <!-- 菜谱库 Tab -->
     <section class="tab-panel" id="panel-recipes">
-      <div class="toolbar">
+      <div class="page-header">
+        <div class="page-heading">
+          <h2>菜谱库</h2>
+          <p>保存、查找和整理常用菜谱</p>
+        </div>
+        <div class="page-actions">
+          <button class="btn btn-sm" id="btnSyncAll" title="同步全部菜谱"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></span> 同步全部</button>
+          <button class="btn btn-sm btn-primary" id="btnNewRecipe">
+            <span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></span> 新建菜谱
+          </button>
+        </div>
+      </div>
+      <div class="page-controls recipe-controls">
         <div class="search-wrapper">
           <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
           <input type="text" id="recipeSearch" placeholder="搜索菜谱..." class="search-input">
         </div>
-        <button class="btn" id="btnSyncAll" title="同步全部菜谱"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></span> 同步全部</button>
-        <button class="btn btn-primary" id="btnNewRecipe">
-          <span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></span> 新建菜谱
-        </button>
       </div>
       <div class="tag-filters" id="tagFilters"></div>
       <div class="recipe-grid" id="recipeGrid"></div>
@@ -96,12 +105,20 @@
 
     <!-- 食材库存 Tab -->
     <section class="tab-panel" id="panel-inventory">
+      <div class="page-header">
+        <div class="page-heading">
+          <h2>食材库存</h2>
+          <p>管理现有食材，看看现在可以做什么</p>
+        </div>
+        <div class="page-actions">
+          <button class="btn btn-sm btn-primary" id="btnAddInventory">+ 添加食材</button>
+        </div>
+      </div>
       <div class="inventory-layout">
         <div class="inventory-left">
-          <div class="toolbar">
-            <h3 class="inv-section-title">食材列表</h3>
+          <div class="section-head inventory-list-head">
+            <h3>食材列表</h3>
             <span class="section-count" id="invCount"></span>
-            <button class="btn btn-primary ml-auto" id="btnAddInventory">+ 添加食材</button>
           </div>
           <div class="inv-controls">
             <div class="search-wrapper">
@@ -124,15 +141,14 @@
 
     <!-- 烹饪足迹 Tab -->
     <section class="tab-panel" id="panel-history">
-      <div class="history-header">
-        <div>
-          <h2 class="history-title">烹饪足迹</h2>
-          <p class="history-subtitle">看看餐桌上的日常，如何一点点积累起来</p>
+      <div class="page-header">
+        <div class="page-heading">
+          <h2>烹饪足迹</h2>
+          <p>看看餐桌上的日常，如何一点点积累起来</p>
         </div>
-        <div class="history-range" id="historyRange" role="group" aria-label="统计范围">
-          <button type="button" class="history-range-btn active" data-history-range="30">近 30 天</button>
-          <button type="button" class="history-range-btn" data-history-range="year">今年</button>
-          <button type="button" class="history-range-btn" data-history-range="all">全部</button>
+        <div class="page-actions">
+          <button type="button" class="btn btn-sm" id="btnHistoryRecords">全部记录</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btnHistoryAdd">+ 补记一次</button>
         </div>
       </div>
       <div id="historyContent"></div>
@@ -181,6 +197,110 @@
     <span class="status-dot"></span>
     <span id="statsText">加载中...</span>
   </footer>
+
+  <!-- 完整做菜记录 -->
+  <div class="modal-overlay" id="modalHistoryRecords" role="dialog" aria-modal="true" aria-labelledby="historyRecordsTitle" hidden>
+    <div class="modal history-records-modal">
+      <div class="modal-header history-records-header">
+        <div>
+          <h2 id="historyRecordsTitle">做菜记录</h2>
+          <p id="historyRecordsSummary">查看和整理每一次下厨</p>
+        </div>
+        <div class="history-records-header-actions">
+          <button type="button" class="btn btn-primary btn-sm" id="btnHistoryRecordsAdd">+ 补记</button>
+          <button type="button" class="btn-icon modal-close" id="btnHistoryRecordsClose" aria-label="关闭做菜记录">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="modal-body history-records-body">
+        <button type="button" class="history-filter-toggle" id="btnHistoryFiltersToggle" aria-expanded="false">
+          <span>筛选记录</span><span aria-hidden="true">⌄</span>
+        </button>
+        <form class="history-records-filters" id="historyRecordsFilters">
+          <label class="history-records-search">
+            <span>搜索</span>
+            <input type="search" id="historyRecordsQuery" placeholder="菜名、备注或家庭成员">
+          </label>
+          <label>
+            <span>开始日期</span>
+            <input type="date" id="historyRecordsFrom">
+          </label>
+          <label>
+            <span>结束日期</span>
+            <input type="date" id="historyRecordsTo">
+          </label>
+          <div class="history-records-filter-actions">
+            <button type="submit" class="btn btn-primary btn-sm">筛选</button>
+            <button type="button" class="btn btn-sm" id="btnHistoryRecordsReset">重置</button>
+          </div>
+        </form>
+        <div class="history-records-view-options">
+          <label for="historyRecordsSort"><span>排序</span>
+            <select id="historyRecordsSort">
+              <option value="newest">最新做过</option>
+              <option value="oldest">最早做过</option>
+              <option value="name">按菜名</option>
+            </select>
+          </label>
+          <label for="historyRecordsPageSize"><span>每页</span>
+            <select id="historyRecordsPageSize">
+              <option value="10">10 条</option>
+              <option value="20">20 条</option>
+              <option value="50">50 条</option>
+            </select>
+          </label>
+        </div>
+        <div class="history-records-list" id="historyRecordsList"></div>
+        <div class="history-records-pagination" id="historyRecordsPagination" hidden>
+          <button type="button" class="btn btn-sm" id="btnHistoryRecordsPrev">上一页</button>
+          <span id="historyRecordsPageInfo"></span>
+          <button type="button" class="btn btn-sm" id="btnHistoryRecordsNext">下一页</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 补记做菜记录 -->
+  <div class="modal-overlay" id="modalHistoryEntry" role="dialog" aria-modal="true" aria-labelledby="historyEntryTitle" hidden>
+    <div class="modal modal-sm history-entry-modal">
+      <div class="modal-header">
+        <div>
+          <h2 id="historyEntryTitle">补记一次做菜</h2>
+          <p class="history-entry-subtitle">只补充足迹，不会扣减当前库存</p>
+        </div>
+        <button type="button" class="btn-icon modal-close" id="btnHistoryEntryClose" aria-label="关闭补记">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form id="historyEntryForm">
+          <div class="form-group">
+            <label for="historyEntryRecipe">关联菜谱（可选）</label>
+            <select id="historyEntryRecipe">
+              <option value="">不关联菜谱</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="historyEntryName">菜名</label>
+            <input type="text" id="historyEntryName" maxlength="100" placeholder="例如：清蒸鲈鱼" required>
+          </div>
+          <div class="form-group">
+            <label for="historyEntryTime">烹饪时间</label>
+            <input type="datetime-local" id="historyEntryTime" required>
+          </div>
+          <div class="form-group">
+            <label for="historyEntryNotes">备注（可选）</label>
+            <textarea id="historyEntryNotes" rows="4" maxlength="1000" placeholder="例如：今天少放了一点盐，味道刚好"></textarea>
+          </div>
+          <div class="form-actions history-entry-actions">
+            <button type="button" class="btn" id="btnHistoryEntryCancel">取消</button>
+            <button type="submit" class="btn btn-primary" id="btnHistoryEntrySave">保存记录</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
 
   <!-- 菜谱详情/编辑弹窗 -->
   <div class="modal-overlay" id="modalRecipe" role="dialog" aria-modal="true" aria-labelledby="modalTitle" hidden>

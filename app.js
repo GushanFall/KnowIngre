@@ -142,6 +142,20 @@ let invFilterCategory = 'all';
 let historyRange = '30';
 let historyYear = new Date().getFullYear();
 let selectedHistoryDate = null;
+const historyRecordsState = {
+  page: 1,
+  pageSize: 10,
+  sort: 'newest',
+  total: 0,
+  totalPages: 1,
+  query: '',
+  from: '',
+  to: '',
+  items: [],
+  editingId: null,
+  requestId: 0,
+  filtersCollapsed: false,
+};
 const kitchenConversations = { personal: [], family: [] };
 let kitchenAssistantBusy = false;
 let kitchenUseInventory = true;
@@ -201,7 +215,16 @@ function renderCurrentTab() {
   else if (currentTab === 'menu') renderMenu();
   else if (currentTab === 'history') renderHistory();
   updateStats();
+  updateKitchenFabMode();
 }
+
+function updateKitchenFabMode() {
+  const button = document.getElementById('btnKitchenAssistant');
+  if (!button) return;
+  button.classList.toggle('is-compact', currentTab === 'history' && window.scrollY > 160);
+}
+
+window.addEventListener('scroll', updateKitchenFabMode, { passive: true });
 
 // ===== Stats =====
 function updateStats() {
@@ -240,7 +263,7 @@ function getHistoryStreak(items) {
   return streak;
 }
 
-function filteredHistory(items) {
+function rangeFilteredHistory(items) {
   const now = new Date();
   let filtered = items.filter(item => !Number.isNaN(new Date(item.cookedAt).getTime()));
   if (historyRange === '30') {
@@ -251,7 +274,6 @@ function filteredHistory(items) {
   } else if (historyRange === 'year') {
     filtered = filtered.filter(item => new Date(item.cookedAt).getFullYear() === now.getFullYear());
   }
-  if (selectedHistoryDate) filtered = filtered.filter(item => localDateKey(item.cookedAt) === selectedHistoryDate);
   return filtered;
 }
 
@@ -259,13 +281,36 @@ function historyMetric(label, value, hint) {
   return `<div class="history-metric"><span class="history-metric-label">${esc(label)}</span><strong>${esc(String(value))}</strong><span class="history-metric-hint">${esc(hint)}</span></div>`;
 }
 
+function historyTimelineHtml(items, emptyText = '还没有烹饪记录') {
+  if (!items.length) return `<p class="history-chart-empty">${esc(emptyText)}</p>`;
+  return items.map(item => {
+    const date = new Date(item.cookedAt);
+    const valid = !Number.isNaN(date.getTime());
+    const day = valid ? `${date.getMonth() + 1}月${date.getDate()}日` : '日期未知';
+    const time = valid ? date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : item.cookedAt;
+    const member = currentScope === 'family' ? (item.username || '历史记录') : '';
+    return `<div class="history-timeline-item">
+      <div class="history-timeline-dot"></div>
+      <div class="history-timeline-date"><strong>${day}</strong><span>${esc(time)}</span></div>
+      <div class="history-timeline-main">
+        <button type="button" ${item.recipeId ? `data-history-recipe="${escAttr(item.recipeId)}"` : 'disabled'}>${esc(item.recipeName)}</button>
+        ${member ? `<span>${esc(member)}</span>` : ''}
+        ${item.notes ? `<span class="history-timeline-note">备注：${esc(item.notes)}</span>` : ''}
+      </div>
+      <button type="button" class="history-undo" data-history-delete="${escAttr(item.id)}" aria-label="撤销这条烹饪记录" title="撤销这条记录">${I.trash}</button>
+    </div>`;
+  }).join('');
+}
+
+function readableHistoryDate(dateKey) {
+  const parts = String(dateKey || '').split('-').map(Number);
+  if (parts.length !== 3 || parts.some(part => !Number.isFinite(part))) return dateKey;
+  return `${parts[0]}年${parts[1]}月${parts[2]}日`;
+}
+
 function renderHistory() {
   const content = document.getElementById('historyContent');
   const items = [...(getData().history || [])].sort((a, b) => new Date(b.cookedAt) - new Date(a.cookedAt));
-  document.querySelectorAll('[data-history-range]').forEach(button => {
-    button.classList.toggle('active', button.dataset.historyRange === historyRange);
-    button.setAttribute('aria-pressed', button.dataset.historyRange === historyRange ? 'true' : 'false');
-  });
 
   const now = new Date();
   const thisMonth = items.filter(item => {
@@ -292,9 +337,14 @@ function renderHistory() {
   if (!years.includes(historyYear)) historyYear = years[0];
 
   const countsByDay = new Map();
+  const countsByMonth = Array(12).fill(0);
   items.forEach(item => {
     const key = localDateKey(item.cookedAt);
-    if (key && key.startsWith(`${historyYear}-`)) countsByDay.set(key, (countsByDay.get(key) || 0) + 1);
+    if (key && key.startsWith(`${historyYear}-`)) {
+      countsByDay.set(key, (countsByDay.get(key) || 0) + 1);
+      const date = new Date(item.cookedAt);
+      if (!Number.isNaN(date.getTime())) countsByMonth[date.getMonth()]++;
+    }
   });
   const yearStart = new Date(historyYear, 0, 1);
   const yearEnd = new Date(historyYear, 11, 31);
@@ -310,7 +360,9 @@ function renderHistory() {
     const week = Math.floor((yearStart.getDay() + dayIndex) / 7) + 1;
     const weekday = date.getDay() + 1;
     const label = `${date.getMonth() + 1}月${date.getDate()}日，${count ? `做了 ${count} 道菜` : '没有记录'}`;
-    heatCells.push(`<button type="button" class="history-heat-cell level-${level}${selectedHistoryDate === key ? ' selected' : ''}" style="grid-column:${week};grid-row:${weekday}" data-history-date="${escAttr(key)}" aria-label="${escAttr(label)}" title="${escAttr(label)}"><span>${count || ''}</span></button>`);
+    heatCells.push(count
+      ? `<button type="button" class="history-heat-cell level-${level}${selectedHistoryDate === key ? ' selected' : ''}" style="grid-column:${week};grid-row:${weekday}" data-history-date="${escAttr(key)}" aria-label="${escAttr(label)}" title="${escAttr(label)}"><span>${count}</span></button>`
+      : `<span class="history-heat-cell level-0" style="grid-column:${week};grid-row:${weekday}" aria-hidden="true"></span>`);
   }
   const monthLabels = Array.from({ length: 12 }, (_, month) => {
     const date = new Date(historyYear, month, 1);
@@ -318,8 +370,19 @@ function renderHistory() {
     const week = Math.floor((yearStart.getDay() + dayIndex) / 7) + 1;
     return `<span style="grid-column:${week}">${month + 1}月</span>`;
   }).join('');
+  const maxMonthCount = Math.max(1, ...countsByMonth);
+  const monthlyTotal = countsByMonth.reduce((sum, count) => sum + count, 0);
+  const monthlyTrendHtml = countsByMonth.map((count, month) => {
+    const height = count ? Math.max(8, Math.round(count / maxMonthCount * 100)) : 0;
+    const label = `${historyYear}年${month + 1}月，做了 ${count} 次`;
+    return `<div class="history-month-column" title="${escAttr(label)}" aria-label="${escAttr(label)}">
+      <strong>${count || ''}</strong>
+      <div class="history-month-track"><span style="height:${height}%"></span></div>
+      <small>${month + 1}月</small>
+    </div>`;
+  }).join('');
 
-  const visibleItems = filteredHistory(items);
+  const visibleItems = rangeFilteredHistory(items);
   const dishCounts = new Map();
   visibleItems.forEach(item => {
     const key = item.recipeId || `deleted:${item.recipeName}`;
@@ -348,25 +411,26 @@ function renderHistory() {
     <div class="history-tag-track"><span style="width:${Math.max(4, count / maxTagCount * 100)}%"></span></div>
   </div>`).join('') : '<p class="history-chart-empty">这个时间范围内还没有标签数据</p>';
 
-  const timelineHtml = visibleItems.length ? visibleItems.slice(0, 20).map(item => {
-    const date = new Date(item.cookedAt);
-    const valid = !Number.isNaN(date.getTime());
-    const day = valid ? `${date.getMonth() + 1}月${date.getDate()}日` : '日期未知';
-    const time = valid ? date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : item.cookedAt;
-    const member = currentScope === 'family' ? (item.username || '历史记录') : '';
-    return `<div class="history-timeline-item">
-      <div class="history-timeline-dot"></div>
-      <div class="history-timeline-date"><strong>${day}</strong><span>${esc(time)}</span></div>
-      <div class="history-timeline-main">
-        <button type="button" ${item.recipeId ? `data-history-recipe="${escAttr(item.recipeId)}"` : 'disabled'}>${esc(item.recipeName)}</button>
-        ${member ? `<span>${esc(member)}</span>` : ''}
-      </div>
-      <button type="button" class="history-undo" data-history-delete="${escAttr(item.id)}" aria-label="撤销这条烹饪记录" title="撤销这条记录">${I.trash}</button>
-    </div>`;
-  }).join('') : '<p class="history-chart-empty">这个时间范围内还没有记录</p>';
-
   const filterLabel = historyRange === '30' ? '近 30 天' : historyRange === 'year' ? '今年' : '全部时间';
-  const selectedHtml = selectedHistoryDate ? `<div class="history-selected-date"><span>正在查看 ${selectedHistoryDate}</span><button type="button" data-history-date-clear>清除日期筛选</button></div>` : '';
+  const rangeControlHtml = `<div class="history-analysis-toolbar">
+    <div><strong>图表范围</strong><span>仅影响“最常做的菜”和“口味与类型”</span></div>
+    <div class="history-range" role="group" aria-label="图表统计范围">
+      <button type="button" class="history-range-btn${historyRange === '30' ? ' active' : ''}" data-history-range="30" aria-pressed="${historyRange === '30'}">近 30 天</button>
+      <button type="button" class="history-range-btn${historyRange === 'year' ? ' active' : ''}" data-history-range="year" aria-pressed="${historyRange === 'year'}">今年</button>
+      <button type="button" class="history-range-btn${historyRange === 'all' ? ' active' : ''}" data-history-range="all" aria-pressed="${historyRange === 'all'}">全部</button>
+    </div>
+  </div>`;
+  const selectedDayItems = selectedHistoryDate
+    ? items.filter(item => localDateKey(item.cookedAt) === selectedHistoryDate)
+    : [];
+  const selectedHtml = selectedHistoryDate ? `<section class="history-section history-day-detail">
+    <div class="history-section-head">
+      <div><h3>${esc(readableHistoryDate(selectedHistoryDate))}</h3><p>${selectedDayItems.length} 条做菜记录</p></div>
+      <button type="button" class="btn btn-sm" data-history-date-clear>关闭当天详情</button>
+    </div>
+    <div class="history-timeline history-day-timeline">${historyTimelineHtml(selectedDayItems, '这一天没有做菜记录')}</div>
+  </section>` : '';
+  const recentItems = items.slice(0, 8);
   content.innerHTML = `
     <div class="history-metrics">${metrics}</div>
     <section class="history-section history-calendar-section">
@@ -379,30 +443,69 @@ function renderHistory() {
           <div class="history-heatmap" style="--history-weeks:${weekCount}" role="grid" aria-label="${historyYear} 年烹饪日历">${heatCells.join('')}</div>
         </div>
       </div>
+      <p class="history-calendar-hint">左右滑动查看全年，有记录的日期可以点击</p>
       <div class="history-legend"><span>少</span><i class="level-0"></i><i class="level-1"></i><i class="level-2"></i><i class="level-3"></i><i class="level-4"></i><span>多</span></div>
     </section>
+    <section class="history-section history-monthly-section">
+      <div class="history-section-head"><div><h3>月度趋势</h3><p>${historyYear} 年共下厨 ${monthlyTotal} 次</p></div></div>
+      <div class="history-monthly-scroll">
+        <div class="history-monthly-chart" role="img" aria-label="${historyYear} 年每月下厨次数">${monthlyTrendHtml}</div>
+      </div>
+    </section>
     ${selectedHtml}
+    ${rangeControlHtml}
     <div class="history-charts">
       <section class="history-section"><div class="history-section-head"><div><h3>最常做的菜</h3><p>${filterLabel}</p></div></div><div class="history-ranking">${rankingHtml}</div></section>
       <section class="history-section"><div class="history-section-head"><div><h3>口味与类型</h3><p>${filterLabel}</p></div></div><div class="history-tags-chart">${tagsHtml}</div></section>
     </div>
-    <section class="history-section history-recent"><div class="history-section-head"><div><h3>最近做过</h3><p>${visibleItems.length} 条符合当前筛选</p></div></div><div class="history-timeline">${timelineHtml}</div></section>`;
+    <section class="history-section history-recent"><div class="history-section-head"><div><h3>最近做过</h3><p>展示最新 ${recentItems.length} 条</p></div><button type="button" class="btn btn-sm" data-history-open-records>查看全部记录</button></div><div class="history-timeline">${historyTimelineHtml(recentItems)}</div></section>`;
 
   document.getElementById('historyYearSelect')?.addEventListener('change', event => {
     historyYear = Number(event.target.value);
+    if (selectedHistoryDate && !selectedHistoryDate.startsWith(`${historyYear}-`)) selectedHistoryDate = null;
     renderHistory();
   });
 }
 
-document.querySelectorAll('[data-history-range]').forEach(button => {
-  button.addEventListener('click', () => {
-    historyRange = button.dataset.historyRange;
-    selectedHistoryDate = null;
-    renderHistory();
+async function refreshHistoryCache() {
+  const [history, recipes] = await Promise.all([
+    apiFetch(scoped('/api/history')),
+    apiFetch(scoped('/api/recipes')),
+  ]);
+  getData().history = history;
+  getData().recipes = recipes;
+}
+
+async function deleteHistoryItem(item) {
+  if (!item) return false;
+  const ok = await customConfirm({
+    title: '撤销烹饪记录',
+    message: `撤销“${item.recipeName}”的这次烹饪记录？`,
+    warning: '只会移除足迹和菜谱上的做过日期，不会恢复当时扣减的库存。',
+    confirmText: '撤销记录',
+    type: 'warning',
   });
-});
+  if (!ok) return false;
+  try {
+    await apiFetch(scoped(`/api/history/${item.id}`), { method: 'DELETE' });
+    await refreshHistoryCache();
+    renderHistory();
+    updateStats();
+    showToast('已撤销这条烹饪记录', 'success');
+    return true;
+  } catch (error) {
+    showToast('撤销失败: ' + error.message, 'error');
+    return false;
+  }
+}
 
 document.getElementById('historyContent').addEventListener('click', async event => {
+  const rangeButton = event.target.closest('[data-history-range]');
+  if (rangeButton) {
+    historyRange = rangeButton.dataset.historyRange;
+    renderHistory();
+    return;
+  }
   const dateButton = event.target.closest('[data-history-date]');
   if (dateButton) {
     selectedHistoryDate = selectedHistoryDate === dateButton.dataset.historyDate ? null : dateButton.dataset.historyDate;
@@ -412,6 +515,10 @@ document.getElementById('historyContent').addEventListener('click', async event 
   if (event.target.closest('[data-history-date-clear]')) {
     selectedHistoryDate = null;
     renderHistory();
+    return;
+  }
+  if (event.target.closest('[data-history-open-records]')) {
+    openHistoryRecords();
     return;
   }
   const recipeButton = event.target.closest('[data-history-recipe]');
@@ -424,28 +531,294 @@ document.getElementById('historyContent').addEventListener('click', async event 
   const deleteButton = event.target.closest('[data-history-delete]');
   if (!deleteButton) return;
   const item = getData().history.find(entry => entry.id === deleteButton.dataset.historyDelete);
-  if (!item) return;
-  const ok = await customConfirm({
-    title: '撤销烹饪记录',
-    message: `撤销“${item.recipeName}”的这次烹饪记录？`,
-    warning: '只会移除足迹和菜谱上的做过日期，不会恢复当时扣减的库存。',
-    confirmText: '撤销记录',
-    type: 'warning',
+  await deleteHistoryItem(item);
+});
+
+function historyDateBoundary(value, endOfDay = false) {
+  if (!value) return '';
+  const date = new Date(`${value}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}`);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+}
+
+function localDateTimeInputValue(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = number => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function renderHistoryRecordsList() {
+  const list = document.getElementById('historyRecordsList');
+  const pagination = document.getElementById('historyRecordsPagination');
+  const summary = document.getElementById('historyRecordsSummary');
+  summary.textContent = historyRecordsState.total
+    ? `共 ${historyRecordsState.total} 条记录，可筛选、修改时间和备注`
+    : '查看和整理每一次下厨';
+  if (!historyRecordsState.items.length) {
+    list.innerHTML = '<div class="history-records-empty"><strong>没有找到记录</strong><span>可以调整搜索词或日期范围再试试</span></div>';
+    pagination.hidden = true;
+    return;
+  }
+  list.innerHTML = historyRecordsState.items.map(item => {
+    const date = new Date(item.cookedAt);
+    const valid = !Number.isNaN(date.getTime());
+    const dateLabel = valid ? date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' }) : '日期未知';
+    const timeLabel = valid ? date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : item.cookedAt;
+    const editing = historyRecordsState.editingId === item.id;
+    return `<article class="history-record-row">
+      <div class="history-record-date"><strong>${esc(dateLabel)}</strong><span>${esc(timeLabel)}</span></div>
+      <div class="history-record-main">
+        <button type="button" class="history-record-name" ${item.recipeId ? `data-history-record-recipe="${escAttr(item.recipeId)}"` : 'disabled'}>${esc(item.recipeName)}</button>
+        <span>${currentScope === 'family' ? esc(item.username || '历史记录') : '个人记录'}</span>
+        ${item.notes ? `<p class="history-record-note">${esc(item.notes)}</p>` : ''}
+      </div>
+      <div class="history-record-actions">
+        <button type="button" class="btn-icon history-record-edit-button" data-history-record-edit="${escAttr(item.id)}" aria-label="编辑时间和备注" title="编辑时间和备注">${I.edit}</button>
+        <button type="button" class="btn-icon history-record-delete" data-history-record-delete="${escAttr(item.id)}" aria-label="删除这条记录" title="删除记录">${I.trash}</button>
+      </div>
+      <form class="history-record-edit${editing ? ' active' : ''}" data-history-record-form="${escAttr(item.id)}" ${editing ? '' : 'hidden'}>
+        <label><span>烹饪时间</span><input type="datetime-local" name="cookedAt" value="${escAttr(localDateTimeInputValue(item.cookedAt))}" required></label>
+        <label class="history-record-edit-note"><span>备注</span><textarea name="notes" rows="2" maxlength="1000" placeholder="记录这次做菜的心得">${esc(item.notes || '')}</textarea></label>
+        <button type="submit" class="btn btn-primary btn-sm">保存</button>
+        <button type="button" class="btn btn-sm" data-history-record-cancel>取消</button>
+      </form>
+    </article>`;
+  }).join('');
+  pagination.hidden = false;
+  document.getElementById('historyRecordsPageInfo').textContent = `第 ${historyRecordsState.page} / ${historyRecordsState.totalPages} 页`;
+  document.getElementById('btnHistoryRecordsPrev').disabled = historyRecordsState.page <= 1;
+  document.getElementById('btnHistoryRecordsNext').disabled = historyRecordsState.page >= historyRecordsState.totalPages;
+}
+
+async function loadHistoryRecords() {
+  const requestId = ++historyRecordsState.requestId;
+  const list = document.getElementById('historyRecordsList');
+  list.innerHTML = '<div class="history-records-loading">正在加载做菜记录…</div>';
+  document.getElementById('historyRecordsPagination').hidden = true;
+  const params = new URLSearchParams({
+    view: 'records',
+    page: String(historyRecordsState.page),
+    pageSize: String(historyRecordsState.pageSize),
+    sort: historyRecordsState.sort,
   });
-  if (!ok) return;
+  if (historyRecordsState.query) params.set('q', historyRecordsState.query);
+  const from = historyDateBoundary(historyRecordsState.from);
+  const to = historyDateBoundary(historyRecordsState.to, true);
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
   try {
-    await apiFetch(scoped(`/api/history/${item.id}`), { method: 'DELETE' });
-    const [history, recipes] = await Promise.all([
-      apiFetch(scoped('/api/history')),
-      apiFetch(scoped('/api/recipes')),
-    ]);
-    getData().history = history;
-    getData().recipes = recipes;
+    const result = await apiFetch(scoped(`/api/history?${params.toString()}`));
+    if (requestId !== historyRecordsState.requestId) return;
+    historyRecordsState.items = result.items || [];
+    historyRecordsState.total = Number(result.total || 0);
+    historyRecordsState.page = Number(result.page || 1);
+    historyRecordsState.totalPages = Number(result.totalPages || 1);
+    historyRecordsState.editingId = null;
+    renderHistoryRecordsList();
+  } catch (error) {
+    if (requestId !== historyRecordsState.requestId) return;
+    list.innerHTML = `<div class="history-records-empty"><strong>记录加载失败</strong><span>${esc(error.message)}</span></div>`;
+  }
+}
+
+function openHistoryRecords() {
+  const modal = document.getElementById('modalHistoryRecords');
+  document.getElementById('historyRecordsQuery').value = historyRecordsState.query;
+  document.getElementById('historyRecordsFrom').value = historyRecordsState.from;
+  document.getElementById('historyRecordsTo').value = historyRecordsState.to;
+  document.getElementById('historyRecordsSort').value = historyRecordsState.sort;
+  document.getElementById('historyRecordsPageSize').value = String(historyRecordsState.pageSize);
+  modal.hidden = false;
+  setHistoryFiltersCollapsed(window.matchMedia('(max-width: 720px)').matches);
+  syncHistoryModalBodyState();
+  loadHistoryRecords();
+}
+
+function closeHistoryRecords() {
+  document.getElementById('modalHistoryRecords').hidden = true;
+  syncHistoryModalBodyState();
+}
+
+function setHistoryFiltersCollapsed(collapsed) {
+  historyRecordsState.filtersCollapsed = !!collapsed;
+  const filters = document.getElementById('historyRecordsFilters');
+  const toggle = document.getElementById('btnHistoryFiltersToggle');
+  filters.classList.toggle('is-collapsed', historyRecordsState.filtersCollapsed);
+  toggle.setAttribute('aria-expanded', historyRecordsState.filtersCollapsed ? 'false' : 'true');
+  toggle.classList.toggle('active', !historyRecordsState.filtersCollapsed);
+}
+
+function syncHistoryModalBodyState() {
+  const recordsOpen = !document.getElementById('modalHistoryRecords').hidden;
+  const entryOpen = !document.getElementById('modalHistoryEntry').hidden;
+  document.body.classList.toggle('history-modal-open', recordsOpen || entryOpen);
+}
+
+document.getElementById('btnHistoryRecords').addEventListener('click', openHistoryRecords);
+document.getElementById('btnHistoryRecordsClose').addEventListener('click', closeHistoryRecords);
+document.getElementById('btnHistoryFiltersToggle').addEventListener('click', () => {
+  setHistoryFiltersCollapsed(!historyRecordsState.filtersCollapsed);
+});
+document.getElementById('historyRecordsFilters').addEventListener('submit', event => {
+  event.preventDefault();
+  historyRecordsState.query = document.getElementById('historyRecordsQuery').value.trim();
+  historyRecordsState.from = document.getElementById('historyRecordsFrom').value;
+  historyRecordsState.to = document.getElementById('historyRecordsTo').value;
+  if (historyRecordsState.from && historyRecordsState.to && historyRecordsState.from > historyRecordsState.to) {
+    showToast('开始日期不能晚于结束日期', 'error');
+    return;
+  }
+  historyRecordsState.page = 1;
+  loadHistoryRecords();
+});
+document.getElementById('btnHistoryRecordsReset').addEventListener('click', () => {
+  historyRecordsState.query = '';
+  historyRecordsState.from = '';
+  historyRecordsState.to = '';
+  historyRecordsState.page = 1;
+  document.getElementById('historyRecordsFilters').reset();
+  loadHistoryRecords();
+});
+document.getElementById('btnHistoryRecordsPrev').addEventListener('click', () => {
+  if (historyRecordsState.page <= 1) return;
+  historyRecordsState.page--;
+  loadHistoryRecords();
+});
+document.getElementById('btnHistoryRecordsNext').addEventListener('click', () => {
+  if (historyRecordsState.page >= historyRecordsState.totalPages) return;
+  historyRecordsState.page++;
+  loadHistoryRecords();
+});
+document.getElementById('historyRecordsSort').addEventListener('change', event => {
+  historyRecordsState.sort = event.target.value;
+  historyRecordsState.page = 1;
+  loadHistoryRecords();
+});
+document.getElementById('historyRecordsPageSize').addEventListener('change', event => {
+  historyRecordsState.pageSize = Number(event.target.value) || 10;
+  historyRecordsState.page = 1;
+  loadHistoryRecords();
+});
+document.getElementById('historyRecordsList').addEventListener('click', async event => {
+  const recipeButton = event.target.closest('[data-history-record-recipe]');
+  if (recipeButton) {
+    const recipe = getData().recipes.find(item => item.id === recipeButton.dataset.historyRecordRecipe);
+    if (recipe) openRecipeModal(recipe.id);
+    else showToast('这份菜谱已被删除，但烹饪记录仍然保留', 'info');
+    return;
+  }
+  const editButton = event.target.closest('[data-history-record-edit]');
+  if (editButton) {
+    historyRecordsState.editingId = editButton.dataset.historyRecordEdit;
+    renderHistoryRecordsList();
+    document.querySelector(`[data-history-record-form="${CSS.escape(historyRecordsState.editingId)}"] input`)?.focus();
+    return;
+  }
+  if (event.target.closest('[data-history-record-cancel]')) {
+    historyRecordsState.editingId = null;
+    renderHistoryRecordsList();
+    return;
+  }
+  const deleteButton = event.target.closest('[data-history-record-delete]');
+  if (!deleteButton) return;
+  const item = historyRecordsState.items.find(entry => entry.id === deleteButton.dataset.historyRecordDelete);
+  if (await deleteHistoryItem(item)) await loadHistoryRecords();
+});
+document.getElementById('historyRecordsList').addEventListener('submit', async event => {
+  const form = event.target.closest('[data-history-record-form]');
+  if (!form) return;
+  event.preventDefault();
+  const formData = new FormData(form);
+  const value = formData.get('cookedAt');
+  const notes = String(formData.get('notes') || '').trim();
+  const cookedDate = new Date(String(value || ''));
+  if (Number.isNaN(cookedDate.getTime())) {
+    showToast('请选择有效的烹饪时间', 'error');
+    return;
+  }
+  const submitButton = form.querySelector('button[type="submit"]');
+  submitButton.disabled = true;
+  try {
+    await apiFetch(scoped(`/api/history/${form.dataset.historyRecordForm}`), {
+      method: 'PATCH',
+      body: { cookedAt: cookedDate.toISOString(), notes },
+    });
+    await refreshHistoryCache();
+    historyRecordsState.editingId = null;
     renderHistory();
     updateStats();
-    showToast('已撤销这条烹饪记录', 'success');
+    await loadHistoryRecords();
+    showToast('做菜记录已更新', 'success');
   } catch (error) {
-    showToast('撤销失败: ' + error.message, 'error');
+    showToast('修改失败: ' + error.message, 'error');
+    submitButton.disabled = false;
+  }
+});
+
+function openHistoryEntry() {
+  const modal = document.getElementById('modalHistoryEntry');
+  const recipeSelect = document.getElementById('historyEntryRecipe');
+  const recipes = [...getData().recipes].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+  recipeSelect.innerHTML = `<option value="">不关联菜谱</option>${recipes.map(recipe => `<option value="${escAttr(recipe.id)}">${esc(recipe.name)}</option>`).join('')}`;
+  document.getElementById('historyEntryForm').reset();
+  document.getElementById('historyEntryTime').value = localDateTimeInputValue(new Date());
+  document.getElementById('historyEntryName').readOnly = false;
+  modal.hidden = false;
+  syncHistoryModalBodyState();
+}
+
+function closeHistoryEntry() {
+  document.getElementById('modalHistoryEntry').hidden = true;
+  syncHistoryModalBodyState();
+}
+
+document.getElementById('btnHistoryAdd').addEventListener('click', openHistoryEntry);
+document.getElementById('btnHistoryRecordsAdd').addEventListener('click', openHistoryEntry);
+document.getElementById('btnHistoryEntryClose').addEventListener('click', closeHistoryEntry);
+document.getElementById('btnHistoryEntryCancel').addEventListener('click', closeHistoryEntry);
+document.getElementById('historyEntryRecipe').addEventListener('change', event => {
+  const recipe = getData().recipes.find(item => item.id === event.target.value);
+  const nameInput = document.getElementById('historyEntryName');
+  if (recipe) nameInput.value = recipe.name;
+  else nameInput.value = '';
+  nameInput.readOnly = !!recipe;
+});
+document.getElementById('historyEntryForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const recipeId = document.getElementById('historyEntryRecipe').value;
+  const recipeName = document.getElementById('historyEntryName').value.trim();
+  const cookedDate = new Date(document.getElementById('historyEntryTime').value);
+  const notes = document.getElementById('historyEntryNotes').value.trim();
+  if (!recipeName) {
+    showToast('请输入菜名', 'error');
+    return;
+  }
+  if (Number.isNaN(cookedDate.getTime())) {
+    showToast('请选择有效的烹饪时间', 'error');
+    return;
+  }
+  const saveButton = document.getElementById('btnHistoryEntrySave');
+  saveButton.disabled = true;
+  try {
+    await apiFetch(scoped('/api/history'), {
+      method: 'POST',
+      body: { recipeId: recipeId || null, recipeName, cookedAt: cookedDate.toISOString(), notes },
+    });
+    await refreshHistoryCache();
+    selectedHistoryDate = localDateKey(cookedDate);
+    historyYear = cookedDate.getFullYear();
+    closeHistoryEntry();
+    renderHistory();
+    updateStats();
+    if (!document.getElementById('modalHistoryRecords').hidden) {
+      historyRecordsState.page = 1;
+      await loadHistoryRecords();
+    }
+    showToast('做菜记录已补记', 'success');
+  } catch (error) {
+    showToast('补记失败: ' + error.message, 'error');
+  } finally {
+    saveButton.disabled = false;
   }
 });
 
@@ -823,6 +1196,7 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
     }
     recipeFormDirty = false;
     overlay.hidden = true;
+    if (overlay.id === 'modalHistoryRecords' || overlay.id === 'modalHistoryEntry') syncHistoryModalBodyState();
   });
 });
 

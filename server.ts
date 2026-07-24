@@ -499,6 +499,7 @@ export async function handle(req: Request): Promise<Response> {
 
   if (method === "GET" && path === "/api/auth/me") {
     const user = db.query("SELECT id, username, is_admin FROM users WHERE id = ?").get(userId) as any;
+    if (!user) return json({ error: "登录账号不存在或已失效" }, 401);
     return json({ user: { id: user.id, username: user.username, isAdmin: !!user.is_admin } });
   }
 
@@ -1134,11 +1135,48 @@ export async function handle(req: Request): Promise<Response> {
   }
 
   // Cooking history
+  if (method === "POST" && path === "/api/history") {
+    const body = await req.json().catch(() => ({}));
+    const recipeId = String(body.recipeId || "").trim();
+    const requestedCookedAt = String(body.cookedAt || "").trim();
+    const parsedCookedAt = new Date(requestedCookedAt);
+    const notes = String(body.notes || "").trim();
+    if (!requestedCookedAt || Number.isNaN(parsedCookedAt.getTime())) {
+      return json({ error: "烹饪时间格式不正确" }, 400);
+    }
+    if (notes.length > 1000) return json({ error: "备注不能超过1000个字符" }, 400);
+
+    const recipe = recipeId
+      ? db.query(`SELECT id, name, cooked_dates FROM recipes
+          WHERE id = ? AND ${filterCol} = ?${extraWhere}`).get(recipeId, ownerId) as any
+      : null;
+    if (recipeId && !recipe) return json({ error: "所选菜谱不存在或无权使用" }, 404);
+    const recipeName = recipe?.name || String(body.recipeName || "").trim();
+    if (!recipeName || recipeName.length > 100) return json({ error: "请输入有效的菜名" }, 400);
+
+    const id = randomUUID();
+    const cookedAt = parsedCookedAt.toISOString();
+    const createHistory = db.transaction(() => {
+      db.query(`INSERT INTO cook_history
+        (id, recipe_id, recipe_name, user_id, family_id, cooked_at, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, recipe?.id || null, recipeName, userId, scope.familyId, cookedAt, notes);
+      if (!recipe) return;
+      const dates = ensureArray(recipe.cooked_dates);
+      dates.push(cookedAt);
+      db.query("UPDATE recipes SET cooked_dates=?, updated_at=? WHERE id=?")
+        .run(JSON.stringify(dates), new Date().toISOString(), recipe.id);
+    });
+    createHistory();
+    return json({ id, recipeId: recipe?.id || null, recipeName, cookedAt, notes }, 201);
+  }
   if (method === "GET" && path === "/api/history") {
     const where = [scope.familyId ? "h.family_id = ?" : "h.user_id = ? AND h.family_id IS NULL"];
-    const params: Array<string> = [ownerId];
+    const params: Array<string | number> = [ownerId];
     const from = url.searchParams.get("from");
     const to = url.searchParams.get("to");
+    const query = String(url.searchParams.get("q") || "").trim().slice(0, 100);
+    const recordsView = url.searchParams.get("view") === "records";
     if (from) {
       if (Number.isNaN(Date.parse(from))) return json({ error: "开始日期格式不正确" }, 400);
       where.push("h.cooked_at >= ?");
@@ -1149,14 +1187,17 @@ export async function handle(req: Request): Promise<Response> {
       where.push("h.cooked_at <= ?");
       params.push(to);
     }
-    const rows = db.query(`SELECT h.id, h.recipe_id, h.recipe_name, h.user_id, h.family_id,
+    if (query) {
+      where.push("(h.recipe_name LIKE ? COLLATE NOCASE OR h.notes LIKE ? COLLATE NOCASE OR COALESCE(u.username, '') LIKE ? COLLATE NOCASE)");
+      params.push(`%${query}%`, `%${query}%`, `%${query}%`);
+    }
+    const selectSql = `SELECT h.id, h.recipe_id, h.recipe_name, h.user_id, h.family_id,
         h.cooked_at, h.servings, h.notes, u.username, r.tags AS recipe_tags
       FROM cook_history h
       LEFT JOIN users u ON u.id = h.user_id
       LEFT JOIN recipes r ON r.id = h.recipe_id
-      WHERE ${where.join(" AND ")}
-      ORDER BY h.cooked_at DESC, h.created_at DESC`).all(...params) as any[];
-    return json(rows.map(row => ({
+      WHERE ${where.join(" AND ")}`;
+    const mapRows = (rows: any[]) => rows.map(row => ({
       id: row.id,
       recipeId: row.recipe_id,
       recipeName: row.recipe_name,
@@ -1167,7 +1208,65 @@ export async function handle(req: Request): Promise<Response> {
       servings: row.servings,
       notes: row.notes || "",
       recipeTags: ensureArray(row.recipe_tags),
-    })));
+    }));
+
+    if (recordsView) {
+      const requestedPage = Number.parseInt(url.searchParams.get("page") || "1", 10);
+      const requestedPageSize = Number.parseInt(url.searchParams.get("pageSize") || "10", 10);
+      const requestedSort = String(url.searchParams.get("sort") || "newest");
+      const sort = ["newest", "oldest", "name"].includes(requestedSort) ? requestedSort : "newest";
+      const orderBy = sort === "oldest"
+        ? "h.cooked_at ASC, h.created_at ASC"
+        : sort === "name"
+          ? "h.recipe_name COLLATE NOCASE ASC, h.cooked_at DESC"
+          : "h.cooked_at DESC, h.created_at DESC";
+      const pageSize = Math.min(50, Math.max(5, Number.isFinite(requestedPageSize) ? requestedPageSize : 10));
+      const total = Number((db.query(`SELECT COUNT(*) AS count
+        FROM cook_history h
+        LEFT JOIN users u ON u.id = h.user_id
+        WHERE ${where.join(" AND ")}`).get(...params) as any)?.count || 0);
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const page = Math.min(totalPages, Math.max(1, Number.isFinite(requestedPage) ? requestedPage : 1));
+      const offset = (page - 1) * pageSize;
+      const rows = db.query(`${selectSql}
+        ORDER BY ${orderBy}
+        LIMIT ? OFFSET ?`).all(...params, pageSize, offset) as any[];
+      return json({ items: mapRows(rows), total, page, pageSize, totalPages, sort });
+    }
+
+    const rows = db.query(`${selectSql}
+      ORDER BY h.cooked_at DESC, h.created_at DESC`).all(...params) as any[];
+    return json(mapRows(rows));
+  }
+  if (method === "PATCH" && path.startsWith("/api/history/")) {
+    const historyId = path.split("/")[3];
+    const body = await req.json().catch(() => ({}));
+    const requestedCookedAt = String(body.cookedAt || "").trim();
+    const notes = String(body.notes || "").trim();
+    const parsedCookedAt = new Date(requestedCookedAt);
+    if (!requestedCookedAt || Number.isNaN(parsedCookedAt.getTime())) {
+      return json({ error: "烹饪时间格式不正确" }, 400);
+    }
+    if (notes.length > 1000) return json({ error: "备注不能超过1000个字符" }, 400);
+    const cookedAt = parsedCookedAt.toISOString();
+    const history = db.query(`SELECT * FROM cook_history
+      WHERE id = ? AND ${filterCol} = ?${extraWhere}`).get(historyId, ownerId) as any;
+    if (!history) return json({ error: "记录不存在或无权修改" }, 404);
+
+    const updateHistory = db.transaction(() => {
+      db.query("UPDATE cook_history SET cooked_at = ?, notes = ? WHERE id = ?").run(cookedAt, notes, historyId);
+      if (!history.recipe_id) return;
+      const recipe = db.query("SELECT cooked_dates FROM recipes WHERE id = ?").get(history.recipe_id) as any;
+      if (!recipe) return;
+      const dates = ensureArray(recipe.cooked_dates);
+      const matchingIndex = dates.indexOf(history.cooked_at);
+      if (matchingIndex === -1) return;
+      dates[matchingIndex] = cookedAt;
+      db.query("UPDATE recipes SET cooked_dates=?, updated_at=? WHERE id=?")
+        .run(JSON.stringify(dates), new Date().toISOString(), history.recipe_id);
+    });
+    updateHistory();
+    return json({ ok: true, cookedAt, notes });
   }
   if (method === "DELETE" && path.startsWith("/api/history/")) {
     const historyId = path.split("/")[3];
