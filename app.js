@@ -82,7 +82,7 @@ const LOW_STOCK_RULES = {
   count: ['个', '只', '枚', '条', '块', '袋', '盒', '包', '斤', '把', '瓶'],
 };
 function isLowStock(item) {
-  if (!item || item.category === '调料') return false;
+  if (!item || isPantryCategory(item.category)) return false;
   const n = parseFloat(item.amount);
   if (isNaN(n)) return false;
   if (n <= 0) return true;
@@ -91,6 +91,11 @@ function isLowStock(item) {
   if (LOW_STOCK_RULES.large.includes(u)) return n <= 0.2;
   if (LOW_STOCK_RULES.count.includes(u)) return n <= 1;
   return false;
+}
+
+function isPantryCategory(category) {
+  const value = String(category || '').trim();
+  return value === '调料' || value === '调味料' || value === '调味品';
 }
 
 // UUID helper
@@ -139,6 +144,8 @@ let editingInventoryId = null;
 let recipeFormDirty = false;
 let invSearchText = '';
 let invFilterCategory = 'all';
+const INVENTORY_SEASONING_VISIBILITY_KEY = 'knowingre_inventory_show_seasonings';
+let showInventorySeasonings = localStorage.getItem(INVENTORY_SEASONING_VISIBILITY_KEY) === '1';
 let historyRange = '30';
 let historyYear = new Date().getFullYear();
 let selectedHistoryDate = null;
@@ -2031,7 +2038,13 @@ async function modifyRecipe(recipe, instruction, onProgress) {
 // ===== Inventory =====
 function renderInventory() {
   const d = getData();
-  document.getElementById('invCount').textContent = d.inventory.length > 0 ? `${d.inventory.length} 种` : '';
+  const seasoningCount = d.inventory.filter(item => isPantryCategory(item.category)).length;
+  const regularCount = d.inventory.length - seasoningCount;
+  document.getElementById('invCount').textContent = d.inventory.length > 0
+    ? (!showInventorySeasonings && seasoningCount > 0
+      ? `${regularCount} 种食材，另有 ${seasoningCount} 种调料`
+      : `${d.inventory.length} 种`)
+    : '';
 
   // Sync UI to memory state (user might have switched tabs)
   const searchInput = document.getElementById('invSearch');
@@ -2044,7 +2057,9 @@ function renderInventory() {
   const q = invSearchText.trim().toLowerCase();
   const filtered = d.inventory.filter(item => {
     if (invFilterCategory === 'low') { if (!isLowStock(item)) return false; }
+    else if (invFilterCategory === '调料') { if (!isPantryCategory(item.category)) return false; }
     else if (invFilterCategory !== 'all' && item.category !== invFilterCategory) return false;
+    else if (!q && !showInventorySeasonings && isPantryCategory(item.category)) return false;
     if (q && !item.name.toLowerCase().includes(q)) return false;
     return true;
   });
@@ -2080,7 +2095,7 @@ function renderInventory() {
         </div>
         <div class="inv-info">
           <span class="inv-name">${esc(item.name)}</span>
-          <span class="inv-amount">${esc(item.amount)}${item.category !== '调料' && item.unit ? ' ' + esc(item.unit) : ''}</span>
+          <span class="inv-amount">${esc(item.amount)}${!isPantryCategory(item.category) && item.unit ? ' ' + esc(item.unit) : ''}</span>
         </div>
       </div>`;
     }).join('');
@@ -2096,15 +2111,25 @@ function renderInventoryChips(inventory) {
   const chipsDiv = document.getElementById('invFilterChips');
   if (!chipsDiv) return;
   const counts = {};
-  inventory.forEach(i => { counts[i.category || '其他'] = (counts[i.category || '其他'] || 0) + 1; });
+  inventory.forEach(i => {
+    const category = isPantryCategory(i.category) ? '调料' : (i.category || '其他');
+    counts[category] = (counts[category] || 0) + 1;
+  });
+  const seasoningCount = counts['调料'] || 0;
+  const visibleAllCount = showInventorySeasonings ? inventory.length : inventory.length - seasoningCount;
   const lowCount = inventory.filter(isLowStock).length;
   const CAT_ORDER = ['蔬菜', '肉类', '水产', '蛋奶', '豆制品', '熟食', '主食', '干货', '调料', '其他'];
   const chips = [
-    { key: 'all', label: `全部 ${inventory.length}` },
+    { key: 'all', label: `全部 ${visibleAllCount}` },
     ...(lowCount > 0 ? [{ key: 'low', label: `低库存 ${lowCount}`, danger: true }] : []),
     ...CAT_ORDER.filter(c => counts[c]).map(c => ({ key: c, label: `${c} ${counts[c]}` })),
   ];
-  chipsDiv.innerHTML = chips.map(c => `
+  const toggle = seasoningCount > 0 ? `
+    <button type="button" class="inv-chip inv-chip--toggle${showInventorySeasonings ? ' inv-chip--active' : ''}" data-inv-seasonings-toggle aria-pressed="${showInventorySeasonings ? 'true' : 'false'}">${showInventorySeasonings ? '隐藏调料' : '显示调料'} ${seasoningCount}</button>
+  ` : '';
+  chipsDiv.innerHTML = chips.slice(0, 1).map(c => `
+    <button type="button" class="inv-chip${invFilterCategory === c.key ? ' inv-chip--active' : ''}${c.danger ? ' inv-chip--danger' : ''}" data-inv-filter="${escAttr(c.key)}">${esc(c.label)}</button>
+  `).join('') + toggle + chips.slice(1).map(c => `
     <button type="button" class="inv-chip${invFilterCategory === c.key ? ' inv-chip--active' : ''}${c.danger ? ' inv-chip--danger' : ''}" data-inv-filter="${escAttr(c.key)}">${esc(c.label)}</button>
   `).join('');
 }
@@ -3072,6 +3097,14 @@ async function init() {
     renderInventory();
   });
   document.getElementById('invFilterChips').addEventListener('click', (e) => {
+    const seasoningToggle = e.target.closest('[data-inv-seasonings-toggle]');
+    if (seasoningToggle) {
+      showInventorySeasonings = !showInventorySeasonings;
+      localStorage.setItem(INVENTORY_SEASONING_VISIBILITY_KEY, showInventorySeasonings ? '1' : '0');
+      if (!showInventorySeasonings && invFilterCategory === '调料') invFilterCategory = 'all';
+      renderInventory();
+      return;
+    }
     const chip = e.target.closest('[data-inv-filter]');
     if (!chip) return;
     invFilterCategory = chip.dataset.invFilter;

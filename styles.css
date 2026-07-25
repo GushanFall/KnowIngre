@@ -873,6 +873,12 @@ body {
   border-color: var(--clay);
   color: #fff;
 }
+.inv-chip--toggle {
+  border-style: dashed;
+}
+.inv-chip--toggle.inv-chip--active {
+  border-style: solid;
+}
 .inv-chip--danger {
   border-color: #fdba74;
   color: #9a3412;
