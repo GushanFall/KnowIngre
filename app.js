@@ -762,14 +762,69 @@ document.getElementById('historyRecordsList').addEventListener('submit', async e
   }
 });
 
+function getHistoryRecipeMatches(query) {
+  const normalized = String(query || '').trim().toLocaleLowerCase();
+  if (!normalized) return [];
+  return getData().recipes
+    .map(recipe => {
+      const name = String(recipe.name || '').toLocaleLowerCase();
+      const score = name === normalized ? 0 : name.startsWith(normalized) ? 1 : name.includes(normalized) ? 2 : 9;
+      return { recipe, score };
+    })
+    .filter(item => item.score < 9)
+    .sort((a, b) => a.score - b.score || a.recipe.name.localeCompare(b.recipe.name, 'zh-CN'))
+    .slice(0, 8)
+    .map(item => item.recipe);
+}
+
+function hideHistoryRecipeSuggestions() {
+  const suggestions = document.getElementById('historyRecipeSuggestions');
+  if (suggestions) suggestions.hidden = true;
+}
+
+function clearHistoryRecipeSelection({ clearName = false } = {}) {
+  document.getElementById('historyEntryRecipe').value = '';
+  document.getElementById('historyRecipeSelected').hidden = true;
+  document.getElementById('historyRecipeSelectedName').textContent = '';
+  if (clearName) document.getElementById('historyEntryName').value = '';
+}
+
+function renderHistoryRecipeSuggestions() {
+  const nameInput = document.getElementById('historyEntryName');
+  const suggestions = document.getElementById('historyRecipeSuggestions');
+  if (!nameInput || !suggestions) return;
+  const query = nameInput.value.trim();
+  const matches = getHistoryRecipeMatches(query);
+  if (!query || !matches.length) {
+    suggestions.innerHTML = '';
+    suggestions.hidden = true;
+    return;
+  }
+  suggestions.innerHTML = matches.map(recipe => `
+    <button type="button" class="history-recipe-suggestion" role="option" data-history-entry-recipe="${escAttr(recipe.id)}">
+      <strong>${esc(recipe.name)}</strong>
+      <span>${recipe.tags?.length ? esc(recipe.tags.slice(0, 3).join(' · ')) : '已有菜谱'}</span>
+    </button>
+  `).join('');
+  suggestions.hidden = false;
+}
+
+function selectHistoryEntryRecipe(recipeId) {
+  const recipe = getData().recipes.find(item => item.id === recipeId);
+  if (!recipe) return;
+  document.getElementById('historyEntryRecipe').value = recipe.id;
+  document.getElementById('historyEntryName').value = recipe.name;
+  document.getElementById('historyRecipeSelectedName').textContent = recipe.name;
+  document.getElementById('historyRecipeSelected').hidden = false;
+  hideHistoryRecipeSuggestions();
+}
+
 function openHistoryEntry() {
   const modal = document.getElementById('modalHistoryEntry');
-  const recipeSelect = document.getElementById('historyEntryRecipe');
-  const recipes = [...getData().recipes].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
-  recipeSelect.innerHTML = `<option value="">不关联菜谱</option>${recipes.map(recipe => `<option value="${escAttr(recipe.id)}">${esc(recipe.name)}</option>`).join('')}`;
   document.getElementById('historyEntryForm').reset();
+  clearHistoryRecipeSelection();
+  hideHistoryRecipeSuggestions();
   document.getElementById('historyEntryTime').value = localDateTimeInputValue(new Date());
-  document.getElementById('historyEntryName').readOnly = false;
   modal.hidden = false;
   syncHistoryModalBodyState();
 }
@@ -783,12 +838,32 @@ document.getElementById('btnHistoryAdd').addEventListener('click', openHistoryEn
 document.getElementById('btnHistoryRecordsAdd').addEventListener('click', openHistoryEntry);
 document.getElementById('btnHistoryEntryClose').addEventListener('click', closeHistoryEntry);
 document.getElementById('btnHistoryEntryCancel').addEventListener('click', closeHistoryEntry);
-document.getElementById('historyEntryRecipe').addEventListener('change', event => {
-  const recipe = getData().recipes.find(item => item.id === event.target.value);
-  const nameInput = document.getElementById('historyEntryName');
-  if (recipe) nameInput.value = recipe.name;
-  else nameInput.value = '';
-  nameInput.readOnly = !!recipe;
+document.getElementById('historyEntryName').addEventListener('input', () => {
+  const selectedId = document.getElementById('historyEntryRecipe').value;
+  const selectedRecipe = getData().recipes.find(item => item.id === selectedId);
+  if (selectedRecipe && selectedRecipe.name !== document.getElementById('historyEntryName').value.trim()) {
+    clearHistoryRecipeSelection();
+  }
+  renderHistoryRecipeSuggestions();
+});
+document.getElementById('historyEntryName').addEventListener('focus', renderHistoryRecipeSuggestions);
+document.getElementById('historyEntryName').addEventListener('keydown', event => {
+  if (event.key === 'Escape') hideHistoryRecipeSuggestions();
+});
+document.getElementById('historyEntryName').addEventListener('blur', () => {
+  window.setTimeout(hideHistoryRecipeSuggestions, 150);
+});
+document.getElementById('historyRecipeSuggestions').addEventListener('mousedown', event => {
+  const option = event.target.closest('[data-history-entry-recipe]');
+  if (option) event.preventDefault();
+});
+document.getElementById('historyRecipeSuggestions').addEventListener('click', event => {
+  const option = event.target.closest('[data-history-entry-recipe]');
+  if (option) selectHistoryEntryRecipe(option.dataset.historyEntryRecipe);
+});
+document.getElementById('btnHistoryRecipeClear').addEventListener('click', () => {
+  clearHistoryRecipeSelection({ clearName: true });
+  document.getElementById('historyEntryName').focus();
 });
 document.getElementById('historyEntryForm').addEventListener('submit', async event => {
   event.preventDefault();
@@ -1403,6 +1478,19 @@ function renderRecipeViewer(recipe) {
   const cookedDates = recipe.cookedDates || recipe.cooked_dates || [];
   const lastCooked = cookedDates.length ? new Date(cookedDates[cookedDates.length - 1]) : null;
   const lastCookedText = lastCooked ? formatRelativeDate(lastCooked) : '尚未制作';
+  const cookingNotes = (getData().history || [])
+    .filter(item => item.recipeId === recipe.id && String(item.notes || '').trim())
+    .sort((a, b) => new Date(b.cookedAt) - new Date(a.cookedAt));
+  const cookingNoteHtml = item => {
+    const date = new Date(item.cookedAt);
+    const dateText = Number.isNaN(date.getTime())
+      ? '时间未知'
+      : date.toLocaleString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const author = currentScope === 'family' && item.username ? ` · ${item.username}` : '';
+    return `<article class="viewer-cooking-note"><div>${esc(dateText + author)}</div><p>${esc(item.notes)}</p></article>`;
+  };
+  const latestCookingNote = cookingNotes[0];
+  const olderCookingNotes = cookingNotes.slice(1);
 
   viewer.innerHTML = `
     <div class="viewer-head">
@@ -1426,11 +1514,31 @@ function renderRecipeViewer(recipe) {
     </section>` : ''}
     ${recipe.notes ? `
     <section class="viewer-section">
-      <h4 class="viewer-section__title">备注</h4>
+      <h4 class="viewer-section__title">菜谱备注</h4>
       <p class="viewer-notes">${esc(recipe.notes)}</p>
+    </section>` : ''}
+    ${latestCookingNote ? `
+    <section class="viewer-section viewer-cooking-notes">
+      <h4 class="viewer-section__title">最近一次做菜备注</h4>
+      ${cookingNoteHtml(latestCookingNote)}
+      ${olderCookingNotes.length ? `
+        <button type="button" class="viewer-notes-toggle" data-viewer-notes-toggle data-count="${olderCookingNotes.length}" aria-expanded="false">查看另外 ${olderCookingNotes.length} 条备注</button>
+        <div class="viewer-cooking-notes-all" data-viewer-notes-all hidden>${olderCookingNotes.map(cookingNoteHtml).join('')}</div>
+      ` : ''}
     </section>` : ''}
   `;
 }
+
+document.getElementById('rfViewer').addEventListener('click', event => {
+  const toggle = event.target.closest('[data-viewer-notes-toggle]');
+  if (!toggle) return;
+  const allNotes = toggle.closest('.viewer-cooking-notes')?.querySelector('[data-viewer-notes-all]');
+  if (!allNotes) return;
+  const expanded = toggle.getAttribute('aria-expanded') === 'true';
+  toggle.setAttribute('aria-expanded', String(!expanded));
+  allNotes.hidden = expanded;
+  toggle.textContent = expanded ? `查看另外 ${toggle.dataset.count} 条备注` : '收起历史备注';
+});
 
 async function withLoading(btn, fn) {
   if (!btn) return fn();
@@ -2302,23 +2410,14 @@ function renderMatchableRecipes() {
 }
 
 async function quickCook(recipeId) {
-  const d = getData();
-  const recipe = d.recipes.find(r => r.id === recipeId);
+  const recipe = getData().recipes.find(r => r.id === recipeId);
   if (!recipe) return;
   try {
     const preview = await apiFetch(scoped(`/api/cook/${recipeId}/preview`), { method: 'POST' });
-    if (preview.requiresConfirmation) {
-      await showCookDoneDialog(recipeId, preview);
-      return;
-    }
-    await apiFetch(scoped(`/api/cook/${recipeId}`), { method: 'POST' });
-    await refreshCookData(d);
+    await showCookDoneDialog(recipeId, preview);
   } catch (err) {
     showToast('操作失败: ' + err.message, 'error');
-    return;
   }
-  showToast(`✓ ${recipe.name} 已完成，库存已扣减`, 'success');
-  renderCurrentTab();
 }
 
 async function refreshCookData(d) {
@@ -2424,6 +2523,10 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
         <p style="margin-bottom:16px;color:var(--text-muted);font-size:0.85rem">已按单位自动计算；无法换算的食材请确认剩余量。留空则保持不变。</p>
         ${pantryHtml}
         <div class="done-list">${itemsHtml}</div>
+        <label class="done-cook-notes">
+          <span>这次做菜的备注（可选）</span>
+          <textarea id="doneNotes" rows="3" maxlength="1000" placeholder="例如：少放一点盐更合适，火候可以再短两分钟"></textarea>
+        </label>
         <div style="display:flex;gap:8px;margin-top:20px">
           <button class="btn btn-primary" id="doneConfirm">确认做完</button>
           <button class="btn" id="doneCancel">取消</button>
@@ -2489,6 +2592,7 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
   overlay.querySelector('#doneConfirm').onclick = async () => {
     // Collect deductions
     const deductions = [];
+    const notes = overlay.querySelector('#doneNotes').value.trim();
     overlay.querySelectorAll('.done-item').forEach(item => {
       const remove = item.querySelector('.done-remove-check').checked;
       const remaining = item.querySelector('.done-remaining').value.trim();
@@ -2504,7 +2608,7 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
     });
 
     try {
-      await apiFetch(scoped(`/api/cook/${recipe.id}`), { method: 'POST', body: { deductions } });
+      await apiFetch(scoped(`/api/cook/${recipe.id}`), { method: 'POST', body: { deductions, notes } });
       await refreshCookData(d);
     } catch (err) { showToast('操作失败: ' + err.message, 'error'); close(); return; }
 

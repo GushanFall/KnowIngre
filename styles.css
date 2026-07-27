@@ -1508,6 +1508,41 @@ body {
   line-height: 1.65;
   white-space: pre-wrap;
 }
+.viewer-cooking-notes { gap: 9px; }
+.viewer-cooking-note {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-card);
+}
+.viewer-cooking-note div {
+  margin-bottom: 5px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.viewer-cooking-note p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.viewer-notes-toggle {
+  align-self: flex-start;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--primary);
+  cursor: pointer;
+  font: 500 0.76rem var(--font-body);
+}
+.viewer-notes-toggle:hover { color: var(--primary-hover); }
+.viewer-cooking-notes-all {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.viewer-cooking-notes-all[hidden] { display: none; }
 @media (max-width: 480px) {
   .viewer-title { font-size: 1.2rem; }
   .viewer-step { grid-template-columns: 26px 1fr; gap: 10px; font-size: 0.88rem; }
@@ -2576,6 +2611,64 @@ button.history-heat-cell:focus-visible { box-shadow: 0 0 0 2px var(--surface), 0
   color: var(--text-muted);
   font-size: 0.72rem;
 }
+.history-entry-recipe-picker { position: relative; }
+.history-recipe-suggestions {
+  position: absolute;
+  z-index: 6;
+  top: calc(100% + 5px);
+  right: 0;
+  left: 0;
+  max-height: 230px;
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+.history-recipe-suggestions[hidden] { display: none; }
+.history-recipe-suggestion {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--font-body);
+  text-align: left;
+}
+.history-recipe-suggestion:hover,
+.history-recipe-suggestion:focus-visible {
+  outline: none;
+  background: var(--primary-ghost);
+}
+.history-recipe-suggestion strong { font-size: 0.84rem; }
+.history-recipe-suggestion span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-recipe-selected {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 7px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: var(--primary-ghost);
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+}
+.history-recipe-selected[hidden] { display: none; }
+.history-recipe-selected strong { color: var(--primary-hover); }
 .history-entry-modal input[type="datetime-local"] {
   width: 100%;
   padding: 10px 14px;
@@ -2595,6 +2688,18 @@ button.history-heat-cell:focus-visible { box-shadow: 0 0 0 2px var(--surface), 0
   justify-content: flex-end;
   gap: 8px;
 }
+.done-cook-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 18px;
+}
+.done-cook-notes > span {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+.done-cook-notes textarea { min-height: 72px; }
 
 @media (max-width: 720px) {
   #modalHistoryRecords {

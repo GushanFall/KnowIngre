@@ -1295,6 +1295,8 @@ export async function handle(req: Request): Promise<Response> {
     const recipeId = path.split("/")[3];
     const isPreview = path.endsWith("/preview");
     const body = await req.json().catch(() => ({}));
+    const notes = String(body.notes || "").trim();
+    if (notes.length > 1000) return json({ error: "备注不能超过1000个字符" }, 400);
     const recipe = db.query(`SELECT * FROM recipes WHERE id = ? AND ${filterCol} = ?${extraWhere}`).get(recipeId, ownerId) as any;
     if (!recipe) return json({ error: "菜谱不存在" }, 404);
 
@@ -1375,9 +1377,9 @@ export async function handle(req: Request): Promise<Response> {
       db.query("UPDATE recipes SET cooked_dates=?, updated_at=? WHERE id=?")
         .run(JSON.stringify(cooked), new Date().toISOString(), recipeId);
       db.query(`INSERT INTO cook_history
-        (id, recipe_id, recipe_name, user_id, family_id, cooked_at)
-        VALUES (?, ?, ?, ?, ?, ?)`).run(
-          randomUUID(), recipeId, recipe.name, userId, scope.familyId, cookedAt,
+        (id, recipe_id, recipe_name, user_id, family_id, cooked_at, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+          randomUUID(), recipeId, recipe.name, userId, scope.familyId, cookedAt, notes,
         );
       db.query(`DELETE FROM today_menu WHERE ${filterCol} = ?${extraWhere} AND recipe_id = ?`).run(ownerId, recipeId);
     });

@@ -276,14 +276,16 @@
       <div class="modal-body">
         <form id="historyEntryForm">
           <div class="form-group">
-            <label for="historyEntryRecipe">关联菜谱（可选）</label>
-            <select id="historyEntryRecipe">
-              <option value="">不关联菜谱</option>
-            </select>
-          </div>
-          <div class="form-group">
             <label for="historyEntryName">菜名</label>
-            <input type="text" id="historyEntryName" maxlength="100" placeholder="例如：清蒸鲈鱼" required>
+            <div class="history-entry-recipe-picker">
+              <input type="hidden" id="historyEntryRecipe">
+              <input type="text" id="historyEntryName" maxlength="100" placeholder="输入菜名，从菜谱库中选择或直接记录" autocomplete="off" required>
+              <div class="history-recipe-suggestions" id="historyRecipeSuggestions" role="listbox" hidden></div>
+            </div>
+            <div class="history-recipe-selected" id="historyRecipeSelected" hidden>
+              <span>已关联菜谱：<strong id="historyRecipeSelectedName"></strong></span>
+              <button type="button" class="btn btn-xs" id="btnHistoryRecipeClear">更换</button>
+            </div>
           </div>
           <div class="form-group">
             <label for="historyEntryTime">烹饪时间</label>

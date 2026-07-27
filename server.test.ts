@@ -178,11 +178,13 @@ describe("cooking history API", () => {
     await request("/api/recipes", "POST", {
       id: "history-recipe", name: "历史测试菜", tags: ["家常"], ingredients: [], steps: [],
     });
-    expect((await request("/api/cook/history-recipe", "POST", {})).status).toBe(200);
+    expect((await request("/api/cook/history-recipe", "POST", { notes: "这次火候正好" })).status).toBe(200);
 
     const history = await request("/api/history");
     const entry = history.data.find((item: any) => item.recipeId === "history-recipe");
-    expect(entry).toMatchObject({ recipeName: "历史测试菜", recipeTags: ["家常"], username: "测试用户" });
+    expect(entry).toMatchObject({
+      recipeName: "历史测试菜", recipeTags: ["家常"], username: "测试用户", notes: "这次火候正好",
+    });
 
     const recipeAfterCook = (await request("/api/recipes")).data.find((item: any) => item.id === "history-recipe");
     expect(recipeAfterCook.cookedDates).toEqual([entry.cookedAt]);
