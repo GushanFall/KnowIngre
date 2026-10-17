@@ -323,7 +323,7 @@
           <div class="ai-panel ai-panel--gen">
             <span class="ai-panel__spark"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l1.5 5.5L19 9l-5.5 1.5L12 16l-1.5-5.5L5 9l5.5-1.5z"/></svg></span>
             <input type="text" id="aiGenDishName" placeholder="输入菜名，AI 自动填入..." class="search-input ai-panel__input">
-            <button class="btn btn-primary btn-sm" id="btnAiGenFill">生成</button>
+            <button type="button" class="btn btn-primary btn-sm" id="btnAiGenFill">生成</button>
             <span id="aiGenStatus" class="ai-panel__status"></span>
           </div>
         </div>
@@ -401,7 +401,7 @@
             <div class="ai-panel ai-panel--modify">
               <span class="ai-panel__label"><svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" fill="none" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> AI 修改</span>
               <input type="text" id="aiModifyInput" placeholder="例如：换成猪肉、减少用油..." class="search-input ai-panel__input text-sm">
-              <button class="btn btn-sm btn-primary" id="btnAiModify">应用</button>
+              <button type="button" class="btn btn-sm btn-primary" id="btnAiModify">应用</button>
               <span id="aiModifyStatus" class="ai-panel__status" style="font-size:0.8rem"></span>
             </div>
           </div>
@@ -474,6 +474,11 @@
           <div class="flex-col" style="gap:10px">
             <button type="button" class="btn btn-full" id="btnExportData"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span> 导出数据</button>
             <button type="button" class="btn btn-full" id="btnImportData"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span> 导入数据</button>
+          </div>
+          <div id="databaseBackupSection" hidden style="margin-top:24px">
+            <h3 style="font-size:0.95rem;margin-bottom:8px">完整数据库备份</h3>
+            <p style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">下载服务器的完整数据库，包含所有账号、个人与家庭数据及 API 配置，请妥善保存。恢复时需在服务器上替换数据库文件。</p>
+            <button type="button" class="btn btn-full" id="btnDownloadDatabase">下载完整数据库（.db）</button>
           </div>
         </div>
 
@@ -580,6 +585,6 @@
   </div>
 
   <div id="toastContainer"></div>
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

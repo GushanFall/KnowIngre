@@ -47,6 +47,7 @@
 - 默认仅允许创建首个管理员账号；已有部署如需临时开放注册，可设置 `OPEN_REGISTRATION=1`
 - 管理员可重置他人密码
 - 数据 JSON 导入导出
+- 管理员可在「设置 → 数据」下载完整 SQLite 数据库备份
 
 ## 本地运行
 
@@ -63,6 +64,21 @@ open http://localhost:3000
 
 首次启动自动创建数据库。停止按 `Ctrl+C`，重启不会丢失数据。
 
+也可以使用 `bun start` 启动、`bun run dev` 监听开发改动、`bun test` 运行测试，无需安装额外依赖。测试使用临时数据库，不会修改项目现有的 `data.db`。
+
+## 数据库备份与恢复
+
+管理员登录后，打开 **设置 → 数据 → 下载完整数据库（.db）**。下载的文件包含所有账号、个人和家庭数据、烹饪记录、单位换算规则、API 配置及数据库中的应用密钥，请保存在可信位置。普通成员仍可使用原有的 JSON 导入导出，处理当前个人或家庭范围的数据。
+
+完整备份在服务运行时生成，使用 SQLite `VACUUM INTO` 创建一致快照，包含已经提交、仍在 WAL 日志中的最新数据。下载得到一个独立 `.db` 文件，无需配套 `.db-wal` 或 `.db-shm`。生成后会清理服务器临时文件；下载接口仅允许管理员访问，并禁止缓存。
+
+完整数据库备份通过服务器文件恢复，不能使用页面上的 JSON 导入按钮。恢复步骤：
+
+1. 停止 Bun 服务，确认没有其他进程连接数据库。
+2. 将现有 `data.db`、`data.db-wal`、`data.db-shm`（若存在）一起移到安全目录保留。不要让旧 WAL 文件留在恢复后的数据库旁边。
+3. 将下载的 `.db` 文件复制为项目目录中的 `data.db`，确认运行服务的账号有读写权限。如果配置了 `KNOWINGRE_DB_PATH`，请使用该路径。
+4. 用原来的环境变量和启动方式重新启动 Bun，登录检查数据。使用环境变量配置的 `JWT_SECRET` 不在数据库中，需另行保留。
+
 ## 升级已有部署
 
 单位换算和烹饪足迹功能使用非破坏性迁移。升级启动时会新增
@@ -73,11 +89,15 @@ open http://localhost:3000
 # 1. 在旧服务仍运行时也可生成一致的 SQLite 备份
 sqlite3 data.db ".backup 'data-before-upgrade.db'"
 
-# 2. 更新项目文件（需要包含新增的 unit-conversion.ts）
+# 2. 更新项目文件（包括 backend/、frontend/ 和 unit-conversion.ts）
 
 # 3. 重启；新表会自动创建
 bun run server.ts
 ```
+
+更新时保留服务器上的 `data.db`、`data.db-wal`、`data.db-shm`、备份和环境配置，不要用本地数据库覆盖。此次代码整理未改变数据库表结构或启动命令。除根目录文件外，务必上传 `backend/`、`frontend/` 两个目录。
+
+如果 Nginx 用作反向代理，更新后需要重启 **Bun 进程**以加载新的后端代码，仅重启 Nginx 不会重启 Bun。Nginx 配置不变时通常无需重启；如果由 Nginx 直接提供静态资源，需同步上传新的 `frontend/` 文件，并确保 `.js` 使用 JavaScript MIME 类型。浏览器刷新后加载新页面。
 
 旧菜谱中的 `200g`、`2个` 等文本会在扣减时即时解析，因此无需批量改写历史数据。
 首次升级会把每份菜谱现有的 `cooked_dates` 逐条复制到 `cook_history`，原字段保持不变；迁移带版本记录，重复启动不会重复导入。
@@ -108,13 +128,28 @@ JWT_SECRET='请替换为足够长的随机字符串' bun run server.ts
 
 ```
 knowingre/
-├── index.html          # 主页面
-├── login.html          # 登录/注册
-├── app.js              # 前端逻辑
-├── styles.css          # 样式
-├── server.ts           # Bun 后端
-├── reset-password.ts   # 命令行重置密码
-└── data.db             # SQLite 数据库（自动生成）
+├── index.html              # 主页面
+├── login.html              # 登录/注册
+├── app.js                  # 页面状态、渲染和交互
+├── styles.css              # 样式与响应式布局
+├── frontend/
+│   ├── api.js              # 登录态和 HTTP 请求
+│   ├── ai-recipe.js        # AI 菜谱解析与校验
+│   └── download.js         # JSON 与数据库文件下载
+├── server.ts               # Bun 启动入口与 API 路由
+├── backend/
+│   ├── database.ts         # 建表、数据迁移和持久化密钥
+│   ├── backup.ts           # SQLite 一致性备份与临时文件清理
+│   ├── ai-prompts.ts       # AI 提示词
+│   ├── recipes.ts          # 菜谱请求校验
+│   ├── cooking.ts          # 库存匹配与扣减计划
+│   ├── http.ts             # JSON 响应和通用辅助函数
+│   └── static.ts           # 静态文件白名单
+├── unit-conversion.ts      # 用量解析和单位换算
+├── *.test.ts               # API、备份、换算和迁移测试
+├── package.json            # 启动、开发和测试命令（无额外依赖）
+├── reset-password.ts       # 命令行重置密码
+└── data.db                 # SQLite 数据库（自动生成，不纳入版本管理）
 ```
 
 ## 技术栈

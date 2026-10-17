@@ -1,39 +1,8 @@
-// ===== API & Auth =====
-const API_BASE = window.location.origin;
-const TOKEN_KEY = 'knowingre_token';
-const USER_KEY = 'knowingre_user';
+import { API_BASE, USER_KEY, getToken, clearToken, apiFetch } from './frontend/api.js';
+import { downloadBlob, downloadDatabaseBackup } from './frontend/download.js';
+import { safeParseJSON, validateAiRecipe } from './frontend/ai-recipe.js';
+
 let dataCache = null;
-
-function sanitizeHeader(s) {
-  // Headers only allow ISO-8859-1, strip anything outside that range
-  return s.replace(/[^\x00-\xFF]/g, '').trim();
-}
-
-function getToken() { return localStorage.getItem(TOKEN_KEY); }
-function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
-function clearToken() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY); }
-
-async function apiFetch(path, options = {}) {
-  const token = getToken();
-  const headers = {};
-  if (options.headers) {
-    for (const [k, v] of Object.entries(options.headers)) {
-      headers[k] = sanitizeHeader(String(v));
-    }
-  }
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  if (options.body && typeof options.body === 'object') {
-    headers['Content-Type'] = 'application/json';
-    options.body = JSON.stringify(options.body);
-  }
-  const resp = await fetch(API_BASE + path, { ...options, headers });
-  if (resp.status === 401) { clearToken(); window.location.href = '/login.html'; throw new Error('未登录'); }
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ error: '请求失败' }));
-    throw new Error(err.error || `HTTP ${resp.status}`);
-  }
-  return resp.json();
-}
 
 function getDefaultData() {
   return {
@@ -1042,6 +1011,7 @@ document.getElementById('btnSettings').addEventListener('click', async () => {
   try {
     const user = JSON.parse(localStorage.getItem(USER_KEY) || '{}');
     const usersTab = document.getElementById('stabUsers');
+    document.getElementById('databaseBackupSection').hidden = !user.isAdmin;
     if (user.isAdmin) {
       usersTab.style.display = '';
       const users = await apiFetch('/api/admin/users');
@@ -1225,12 +1195,16 @@ document.getElementById('adminUserList').addEventListener('click', async (e) => 
 document.getElementById('btnExportData').addEventListener('click', () => {
   const data = getData();
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `knowingre-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, `knowingre-backup-${new Date().toISOString().slice(0, 10)}.json`);
+});
+
+document.getElementById('btnDownloadDatabase').addEventListener('click', async (event) => {
+  try {
+    await withLoading(event.currentTarget, downloadDatabaseBackup);
+    showToast('数据库备份已生成，已交给浏览器下载', 'success');
+  } catch (error) {
+    showToast('下载失败: ' + error.message, 'error');
+  }
 });
 
 document.getElementById('btnImportData').addEventListener('click', () => {
@@ -1740,22 +1714,43 @@ document.getElementById('rfRating').addEventListener('click', (e) => {
 
 // AI gen fill in recipe modal
 function resetRecipeFormToEmpty() {
+  renderRecipeRows({ ingredients: [{ name: '', amount: '', optional: false }], steps: [''] });
+}
+
+function renderRecipeRows(recipe, animate = false) {
+  const ingredients = Array.isArray(recipe?.ingredients) && recipe.ingredients.length
+    ? recipe.ingredients
+    : [{ name: '', amount: '', optional: false }];
+  const steps = Array.isArray(recipe?.steps) && recipe.steps.length ? recipe.steps : [''];
   const ingDiv = document.getElementById('rfIngredients');
   const stepDiv = document.getElementById('rfSteps');
-  ingDiv.innerHTML = `<div class="ingredient-row">
-    <input type="text" placeholder="食材名称" value="" data-ing-name>
-    <input type="text" placeholder="用量 (如200g)" value="" data-ing-amount style="max-width:150px">
-    <label style="font-weight:normal;display:flex;align-items:center;gap:4px;margin:0;white-space:nowrap">
-      <input type="checkbox" data-ing-opt> 可选
-    </label>
-    <button type="button" class="row-remove" data-remove-ing>×</button>
-  </div>`;
-  stepDiv.innerHTML = `<div class="step-row">
-    <span class="step-num">1</span>
-    <textarea placeholder="步骤 1" data-step></textarea>
-    <button type="button" class="row-remove" data-remove-step>×</button>
-  </div>`;
+  ingDiv.innerHTML = ingredients.map((ing, i) => `
+    <div class="ingredient-row${animate ? ' reveal-row' : ''}"${animate ? ` style="animation-delay:${i * 0.05}s"` : ''}>
+      <input type="text" placeholder="食材名称" value="${escAttr(ing.name || '')}" data-ing-name>
+      <input type="text" placeholder="用量 (如200克)" value="${escAttr(ing.amount || '')}" data-ing-amount style="max-width:150px">
+      <label style="font-weight:normal;display:flex;align-items:center;gap:4px;margin:0;white-space:nowrap">
+        <input type="checkbox" ${ing.optional ? 'checked' : ''} data-ing-opt> 可选
+      </label>
+      <button type="button" class="row-remove" data-remove-ing>×</button>
+    </div>
+  `).join('');
+  stepDiv.innerHTML = steps.map((step, i) => `
+    <div class="step-row${animate ? ' reveal-row' : ''}"${animate ? ` style="animation-delay:${i * 0.06}s"` : ''}>
+      <span class="step-num">${i + 1}</span>
+      <textarea placeholder="步骤 ${i + 1}" data-step>${esc(step || '')}</textarea>
+      <button type="button" class="row-remove" data-remove-step>×</button>
+    </div>
+  `).join('');
   bindRemoveButtons();
+  autoGrowAllSteps();
+}
+
+function applyAiRecipeToForm(recipe) {
+  document.getElementById('rfName').value = recipe.name;
+  document.getElementById('rfTags').value = recipe.tags.join(', ');
+  document.getElementById('rfNotes').value = recipe.notes;
+  document.getElementById('rfSource').value = 'ai';
+  renderRecipeRows(recipe, true);
 }
 
 document.getElementById('btnAiGenFill').addEventListener('click', async () => {
@@ -1764,6 +1759,9 @@ document.getElementById('btnAiGenFill').addEventListener('click', async () => {
   if (!dishName) { showToast('请输入菜名', 'error'); return; }
   const status = document.getElementById('aiGenStatus');
   const btn = document.getElementById('btnAiGenFill');
+  const d = getData();
+  if (!d.settings.hasApiKey) { showToast('请先设置 API Key', 'error'); return; }
+  const previous = collectRecipeForm();
 
   // Show shimmer skeletons
   status.innerHTML = '<span class="ai-spinner"></span> AI 正在生成菜谱...';
@@ -1778,42 +1776,15 @@ document.getElementById('btnAiGenFill').addEventListener('click', async () => {
   ).join('');
 
   try {
-    const d = getData();
-    if (!d.settings.hasApiKey) { showToast('请先设置 API Key', 'error'); resetRecipeFormToEmpty(); status.textContent = ''; btn.disabled = false; return; }
     let started = false;
     const recipe = await callLLM(dishName, () => {
       if (!started) { started = true; status.innerHTML = '<span class="ai-spinner"></span> 生成中…'; }
     });
-    // Fill form with staggered reveal
-    document.getElementById('rfName').value = recipe.name;
-    document.getElementById('rfTags').value = (recipe.tags || []).join(', ');
-    document.getElementById('rfNotes').value = recipe.notes || '';
-    // Ingredients
-    ingDiv.innerHTML = (recipe.ingredients || []).map((ing, i) => `
-      <div class="ingredient-row reveal-row" style="animation-delay:${i * 0.05}s">
-        <input type="text" placeholder="食材名称" value="${escAttr(ing.name)}" data-ing-name>
-        <input type="text" placeholder="用量 (如200g)" value="${escAttr(ing.amount)}" data-ing-amount style="max-width:150px">
-        <label style="font-weight:normal;display:flex;align-items:center;gap:4px;margin:0;white-space:nowrap">
-          <input type="checkbox" ${ing.optional ? 'checked' : ''} data-ing-opt> 可选
-        </label>
-        <button type="button" class="row-remove" data-remove-ing>×</button>
-      </div>
-    `).join('');
-    // Steps
-    stepDiv.innerHTML = (recipe.steps || []).map((s, i) => `
-      <div class="step-row reveal-row" style="animation-delay:${i * 0.06}s">
-        <span class="step-num">${i + 1}</span>
-        <textarea placeholder="步骤 ${i + 1}" data-step>${esc(s)}</textarea>
-        <button type="button" class="row-remove" data-remove-step>×</button>
-      </div>
-    `).join('');
-    document.getElementById('rfSource').value = 'ai';
-    bindRemoveButtons();
-    autoGrowAllSteps();
+    applyAiRecipeToForm(recipe);
     recipeFormDirty = true;
     status.innerHTML = '<span class="ai-check">✓</span> 已填入';
   } catch (err) {
-    resetRecipeFormToEmpty();
+    renderRecipeRows(previous);
     status.textContent = '❌ ' + err.message;
   }
   btn.disabled = false;
@@ -1831,6 +1802,8 @@ document.getElementById('btnAiModify').addEventListener('click', async () => {
   }
   const status = document.getElementById('aiModifyStatus');
   const btn = document.getElementById('btnAiModify');
+  const d = getData();
+  if (!d.settings.hasApiKey) { showToast('请先设置 API Key', 'error'); return; }
 
   // Show shimmer skeletons
   status.innerHTML = '<span class="ai-spinner"></span> AI 正在修改菜谱...';
@@ -1847,42 +1820,16 @@ document.getElementById('btnAiModify').addEventListener('click', async () => {
   ).join('');
 
   try {
-    const d = getData();
-    if (!d.settings.hasApiKey) { showToast('请设置 API Key', 'error'); resetRecipeFormToEmpty(); status.textContent = ''; btn.disabled = false; return; }
     let startedModify = false;
     const updated = await modifyRecipe(current, instruction, () => {
       if (!startedModify) { startedModify = true; status.innerHTML = '<span class="ai-spinner"></span> 修改中…'; }
     });
-    // Fill form with staggered reveal
-    document.getElementById('rfName').value = updated.name || current.name;
-    document.getElementById('rfTags').value = (updated.tags?.length ? updated.tags : current.tags || []).join(', ');
-    document.getElementById('rfNotes').value = updated.notes || current.notes || '';
-    const ings = updated.ingredients?.length ? updated.ingredients : current.ingredients;
-    ingDiv.innerHTML = ings.map((ing, i) => `
-      <div class="ingredient-row reveal-row" style="animation-delay:${i * 0.05}s">
-        <input type="text" placeholder="食材名称" value="${escAttr(ing.name)}" data-ing-name>
-        <input type="text" placeholder="用量 (如200g)" value="${escAttr(ing.amount)}" data-ing-amount style="max-width:150px">
-        <label style="font-weight:normal;display:flex;align-items:center;gap:4px;margin:0;white-space:nowrap">
-          <input type="checkbox" ${ing.optional ? 'checked' : ''} data-ing-opt> 可选
-        </label>
-        <button type="button" class="row-remove" data-remove-ing>×</button>
-      </div>
-    `).join('');
-    const stps = updated.steps?.length ? updated.steps : current.steps;
-    stepDiv.innerHTML = stps.map((s, i) => `
-      <div class="step-row reveal-row" style="animation-delay:${i * 0.06}s">
-        <span class="step-num">${i + 1}</span>
-        <textarea placeholder="步骤 ${i + 1}" data-step>${esc(s)}</textarea>
-        <button type="button" class="row-remove" data-remove-step>×</button>
-      </div>
-    `).join('');
-    document.getElementById('rfSource').value = 'ai';
-    bindRemoveButtons();
-    autoGrowAllSteps();
+    applyAiRecipeToForm(updated);
     recipeFormDirty = true;
     status.innerHTML = '<span class="ai-check">✓</span> 已修改';
     document.getElementById('aiModifyInput').value = '';
   } catch (err) {
+    renderRecipeRows(current);
     status.textContent = '❌ ' + err.message;
   }
   btn.disabled = false;
@@ -2026,29 +1973,40 @@ async function saveRecipeFromModal() {
   if (form.ingredients.length === 0) { showToast('请至少添加一种食材', 'error'); return; }
 
   const d = getData();
+  const sameRecipeName = recipe => recipe.name.trim().localeCompare(form.name, 'zh-CN', { sensitivity: 'base' }) === 0;
+  let updatedExisting = false;
   if (editingRecipeId) {
-    // Check conflict
-    const conflict = d.recipes.find(r => r.name === form.name && r.id !== editingRecipeId);
+    const conflict = d.recipes.find(r => r.id !== editingRecipeId && sameRecipeName(r));
     if (conflict) {
-      if (!await customConfirm({ title: '覆盖同名菜谱', message: `菜谱库中已有另一份「${form.name}」。确定用当前内容覆盖吗？`, confirmText: '覆盖', type: 'warning' })) return;
+      showToast(`菜谱库中已有另一份「${form.name}」，请换一个名称`, 'error');
+      return;
     }
     try {
-      const body = { ...form, cookedDates: (d.recipes.find(r => r.id === editingRecipeId)?.cookedDates || []) };
-      await apiFetch(scoped(`/api/recipes/${editingRecipeId}`), { method: 'PUT', body });
+      await apiFetch(scoped(`/api/recipes/${editingRecipeId}`), { method: 'PUT', body: form });
       // Refresh from server
       const recipes = await apiFetch(scoped('/api/recipes'));
       d.recipes = recipes;
     } catch (err) { showToast('保存失败: ' + err.message, 'error'); return; }
   } else {
-    const dup = d.recipes.find(r => r.name === form.name);
-    if (dup && !await customConfirm({ title: '覆盖同名菜谱', message: `菜谱库中已有「${form.name}」。确定用当前内容覆盖吗？`, confirmText: '覆盖', type: 'warning' })) return;
+    const dup = d.recipes.find(sameRecipeName);
+    if (dup && !await customConfirm({
+      title: '更新已有菜谱',
+      message: `菜谱库中已有「${form.name}」。是否用当前内容更新这份菜谱？原有烹饪记录会保留。`,
+      confirmText: '更新原菜谱',
+      type: 'warning'
+    })) return;
     try {
-      await apiFetch(scoped('/api/recipes'), { method: 'POST', body: { ...form, id: uid() } });
+      if (dup) {
+        await apiFetch(scoped(`/api/recipes/${dup.id}`), { method: 'PUT', body: form });
+        updatedExisting = true;
+      } else {
+        await apiFetch(scoped('/api/recipes'), { method: 'POST', body: { ...form, id: uid() } });
+      }
       const recipes = await apiFetch(scoped('/api/recipes'));
       d.recipes = recipes;
     } catch (err) { showToast('保存失败: ' + err.message, 'error'); return; }
   }
-  showToast(editingRecipeId ? '菜谱已更新' : '菜谱已创建', 'success');
+  showToast(editingRecipeId || updatedExisting ? '菜谱已更新' : '菜谱已创建', 'success');
   recipeFormDirty = false;
   if (editingRecipeId) {
     // Stay open, switch back to view mode with fresh data
@@ -2109,38 +2067,41 @@ async function streamAiContent(path, body, onProgress) {
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
   let full = '';
+  const consumeSseLine = line => {
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') return;
+    try {
+      const chunk = JSON.parse(data);
+      const delta = chunk.choices?.[0]?.delta?.content;
+      if (typeof delta === 'string' && delta) {
+        full += delta;
+        onProgress?.(full);
+      }
+    } catch {}
+  };
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
     buffer = lines.pop() || '';
-    for (const line of lines) {
-      if (!line.startsWith('data:')) continue;
-      const data = line.slice(5).trim();
-      if (!data || data === '[DONE]') continue;
-      try {
-        const chunk = JSON.parse(data);
-        const delta = chunk.choices?.[0]?.delta?.content;
-        if (delta) {
-          full += delta;
-          onProgress?.(full);
-        }
-      } catch {}
-    }
+    lines.forEach(consumeSseLine);
   }
+  buffer += decoder.decode();
+  buffer.split('\n').forEach(consumeSseLine);
   return full;
 }
 
 async function callLLM(dishName, onProgress) {
   const content = await streamAiContent('/api/ai/generate-recipe', { dishName }, onProgress);
-  return safeParseJSON(content);
+  return validateAiRecipe(safeParseJSON(content));
 }
 
 // AI modify — update existing recipe content via LLM
 async function modifyRecipe(recipe, instruction, onProgress) {
   const content = await streamAiContent('/api/ai/modify-recipe', { recipe, instruction }, onProgress);
-  return safeParseJSON(content);
+  return validateAiRecipe(safeParseJSON(content));
 }
 
 // ===== Inventory =====
@@ -2698,42 +2659,6 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
 }
 
-// Safe JSON parse with fallback for AI responses
-function safeParseJSON(str) {
-  if (!str) throw new Error('AI 返回内容为空，请重试');
-
-  let trimmed = str.trim();
-
-  // Remove markdown code block fences
-  if (trimmed.startsWith('```')) {
-    trimmed = trimmed.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?\s*```$/, '');
-  }
-
-  // Try direct parse
-  try {
-    return JSON.parse(trimmed);
-  } catch (e) {
-    // Try to extract first JSON object from the response
-    const match = trimmed.match(/\{[\s\S]*\}/);
-    if (match) {
-      let fixed = match[0];
-      // Fix trailing commas before ] and }
-      fixed = fixed.replace(/,\s*([\]}])/g, '$1');
-      // Replace single-quoted keys with double-quoted keys (safe: keys are simple identifiers)
-      fixed = fixed.replace(/'([^']+)'\s*:/g, '"$1":');
-      // Replace single-quoted string values — be conservative, only when the value
-      // looks like it doesn't contain nested single quotes that would break the match
-      fixed = fixed.replace(/:\s*'([^'"]*)'\s*([,}\]])/g, ':"$1"$2');
-      try {
-        return JSON.parse(fixed);
-      } catch (e2) {
-        throw new Error('AI 返回格式异常，无法解析。请重试。');
-      }
-    }
-    throw new Error('AI 返回格式异常，无法解析。请重试。');
-  }
-}
-
 // ===== Today Menu =====
 function renderMenu() {
   const d = getData();
@@ -3125,7 +3050,8 @@ async function init() {
   if (!token) { window.location.href = '/login.html'; return; }
 
   try {
-    await apiFetch('/api/auth/me');
+    const { user } = await apiFetch('/api/auth/me');
+    localStorage.setItem(USER_KEY, JSON.stringify(user));
   } catch {
     window.location.href = '/login.html';
     return;
