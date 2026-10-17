@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -227,6 +227,192 @@ describe("cook deduction API", () => {
     expect(result.status).toBe(409);
     const inventory = await request("/api/inventory");
     expect(inventory.data.find((entry: any) => entry.id === "stale-stock").amount).toBe("6");
+  });
+
+  test("preserves an embedded inventory unit when cooking legacy data", async () => {
+    await request("/api/inventory", "POST", { id: "legacy-embedded-stock", name: "带单位米", amount: "1kg", unit: "" });
+    await request("/api/recipes", "POST", { id: "legacy-embedded-recipe", name: "带单位米饭", ingredients: [{ name: "带单位米", amount: "200g" }], steps: [] });
+    const preview = (await request("/api/cook/legacy-embedded-recipe/preview", "POST", {})).data;
+    expect(preview.items[0]).toMatchObject({ inventoryAmount: "1", inventoryUnit: "kg", remaining: "0.8" });
+    expect((await request("/api/cook/legacy-embedded-recipe", "POST", {})).status).toBe(200);
+    expect((await request("/api/inventory")).data.find((item: any) => item.id === "legacy-embedded-stock"))
+      .toMatchObject({ amount: "0.8", unit: "kg" });
+  });
+});
+
+describe("whole-menu cooking", () => {
+  beforeEach(async () => {
+    await request("/api/menu", "DELETE");
+  });
+
+  async function menuRecipe(id: string, ingredients: any[]) {
+    expect((await request("/api/recipes", "POST", { id, name: id, ingredients, steps: [] })).status).toBe(200);
+    expect((await request(`/api/menu/${id}`, "POST")).status).toBe(200);
+  }
+
+  async function snapshot(ids: string[]) {
+    const response = await request("/api/cook-batch/preview", "POST", { recipeIds: ids });
+    expect(response.status).toBe(200);
+    return response.data;
+  }
+
+  test("aggregates mixed units across recipes and commits the entire menu once", async () => {
+    await request("/api/inventory", "POST", { id: "batch-flour", name: "批量面粉", amount: "1", unit: "kg" });
+    await menuRecipe("batch-flour-a", [{ name: "批量面粉", amount: "200g" }]);
+    await menuRecipe("batch-flour-b", [{ name: "批量面粉", amount: "0.3kg" }]);
+    const ids = ["batch-flour-a", "batch-flour-b"];
+    const preview = await snapshot(ids);
+    expect(preview.items).toHaveLength(1);
+    expect(preview.items[0]).toMatchObject({ convertedNeeded: 0.5, remaining: "0.5" });
+    expect((await request("/api/menu")).data).toHaveLength(2); // Preview has no side effects.
+    const before = (await request("/api/history")).data.length;
+    expect((await request("/api/cook-batch", "POST", { recipeIds: ids, snapshot: preview.snapshot })).status).toBe(200);
+    expect((await request("/api/menu")).data).toHaveLength(0);
+    expect((await request("/api/inventory")).data.find((item: any) => item.id === "batch-flour").amount).toBe("0.5");
+    expect((await request("/api/history")).data.length).toBe(before + 2);
+    // A retry cannot cook the now-cleared menu a second time.
+    expect((await request("/api/cook-batch", "POST", { recipeIds: ids, snapshot: preview.snapshot })).status).toBe(409);
+    expect((await request("/api/history")).data.length).toBe(before + 2);
+  });
+
+  test("one unresolved item blocks all writes until explicitly confirmed", async () => {
+    await request("/api/inventory", "POST", { id: "batch-pepper", name: "批量青椒", amount: "4", unit: "个" });
+    await menuRecipe("batch-pepper-a", [{ name: "批量青椒", amount: "1个" }]);
+    await menuRecipe("batch-pepper-b", [{ name: "批量青椒", amount: "100g" }]);
+    const ids = ["batch-pepper-a", "batch-pepper-b"];
+    const preview = await snapshot(ids);
+    expect(preview.items).toHaveLength(1);
+    expect(preview.requiresConfirmation).toBe(true);
+    const before = (await request("/api/history")).data.length;
+    for (const deductions of [undefined, []]) {
+      expect((await request("/api/cook-batch", "POST", { recipeIds: ids, deductions })).status).toBe(409);
+    }
+    expect((await request("/api/history")).data.length).toBe(before);
+    expect((await request("/api/menu")).data).toHaveLength(2);
+    expect((await request("/api/inventory")).data.find((item: any) => item.id === "batch-pepper").amount).toBe("4");
+    expect((await request("/api/cook-batch", "POST", {
+      recipeIds: ids, snapshot: preview.snapshot,
+      deductions: [{ inventoryId: "batch-pepper", remaining: "2.5", unit: "个", inventoryVersion: preview.items[0].inventoryVersion }],
+    })).status).toBe(200);
+    expect((await request("/api/menu")).data).toHaveLength(0);
+    expect((await request("/api/inventory")).data.find((item: any) => item.id === "batch-pepper").amount).toBe("2.5");
+  });
+
+  test("reuses a saved piece-to-weight rule for the whole menu without rounding each dish up", async () => {
+    await request("/api/inventory", "POST", { id: "batch-tomato", name: "批量番茄", amount: "3", unit: "个" });
+    await request("/api/unit-conversions", "POST", { ingredientName: "批量番茄", fromUnit: "个", toUnit: "g", factor: 200 });
+    await menuRecipe("batch-tomato-a", [{ name: "批量番茄", amount: "100g" }]);
+    await menuRecipe("batch-tomato-b", [{ name: "批量番茄", amount: "0.1kg" }]);
+    const ids = ["batch-tomato-a", "batch-tomato-b"];
+    const preview = await snapshot(ids);
+    expect(preview.items[0]).toMatchObject({ remaining: "2", convertedNeeded: 1 });
+    expect((await request("/api/cook-batch", "POST", { recipeIds: ids })).status).toBe(200);
+    expect((await request("/api/inventory")).data.find((item: any) => item.id === "batch-tomato").amount).toBe("2");
+  });
+
+  test("rejects a stale preview without recording any dishes", async () => {
+    await request("/api/inventory", "POST", { id: "batch-stale", name: "批量藕", amount: "1000", unit: "g" });
+    await menuRecipe("batch-stale-a", [{ name: "批量藕", amount: "100g" }]);
+    const ids = ["batch-stale-a"];
+    const preview = await snapshot(ids);
+    await request("/api/inventory/batch-stale", "PUT", { name: "批量藕", amount: "900", unit: "g" });
+    const before = (await request("/api/history")).data.length;
+    expect((await request("/api/cook-batch", "POST", { recipeIds: ids, snapshot: preview.snapshot })).status).toBe(409);
+    expect((await request("/api/history")).data.length).toBe(before);
+    expect((await request("/api/menu")).data).toHaveLength(1);
+    expect((await request("/api/inventory")).data.find((item: any) => item.id === "batch-stale").amount).toBe("900");
+  });
+
+  test("detects a changed menu and rejects duplicate recipe IDs", async () => {
+    await menuRecipe("batch-menu-a", []);
+    const preview = await snapshot(["batch-menu-a"]);
+    await menuRecipe("batch-menu-b", []);
+    expect((await request("/api/cook-batch", "POST", { recipeIds: ["batch-menu-a"], snapshot: preview.snapshot })).status).toBe(409);
+    expect((await request("/api/cook-batch", "POST", { recipeIds: ["batch-menu-a", "batch-menu-a"] })).status).toBe(400);
+    expect((await request("/api/menu")).data).toHaveLength(2);
+  });
+
+  test("sums duplicate ingredients within a single dish for both preview and manual confirmation", async () => {
+    await request("/api/inventory", "POST", { id: "batch-duplicate", name: "重复食材", amount: "1000", unit: "g" });
+    await menuRecipe("batch-duplicate-a", [{ name: "重复食材", amount: "200g" }, { name: "重复食材", amount: "300g" }]);
+    const preview = (await request("/api/cook/batch-duplicate-a/preview", "POST", {})).data;
+    expect(preview.items).toHaveLength(1);
+    expect(preview.items[0].remaining).toBe("500");
+    expect((await request("/api/cook/batch-duplicate-a", "POST", {
+      snapshot: preview.snapshot, deductions: [{ inventoryId: "batch-duplicate", remaining: "500", unit: "g" }],
+    })).status).toBe(200);
+    expect((await request("/api/inventory")).data.find((item: any) => item.id === "batch-duplicate").amount).toBe("500");
+  });
+
+  test("validates every manual remainder before applying any changes", async () => {
+    await request("/api/inventory", "POST", { id: "batch-valid", name: "校验萝卜", amount: "5", unit: "个" });
+    await request("/api/inventory", "POST", { id: "batch-invalid", name: "校验白菜", amount: "5", unit: "个" });
+    await menuRecipe("batch-validate-a", [{ name: "校验萝卜", amount: "1个" }, { name: "校验白菜", amount: "1个" }]);
+    expect((await request("/api/cook-batch", "POST", {
+      recipeIds: ["batch-validate-a"], deductions: [
+        { inventoryId: "batch-valid", remaining: "4", unit: "个" },
+        { inventoryId: "batch-invalid", remaining: "-1", unit: "个" },
+      ],
+    })).status).toBe(400);
+    expect((await request("/api/inventory")).data.find((item: any) => item.id === "batch-valid").amount).toBe("5");
+    expect((await request("/api/menu")).data).toHaveLength(1);
+  });
+
+  test("reports aggregate shortages instead of silently clamping each dish to zero", async () => {
+    await request("/api/inventory", "POST", { id: "batch-short", name: "短缺食材", amount: "3", unit: "个" });
+    await menuRecipe("batch-short-a", [{ name: "短缺食材", amount: "2个" }]);
+    await menuRecipe("batch-short-b", [{ name: "短缺食材", amount: "2个" }]);
+    const ids = ["batch-short-a", "batch-short-b"];
+    expect((await snapshot(ids)).items[0]).toMatchObject({ insufficient: true, remaining: "0" });
+    expect((await request("/api/cook-batch", "POST", { recipeIds: ids })).status).toBe(409);
+  });
+
+  test("rolls back inventory, both cooking records and the menu on a database failure", async () => {
+    await request("/api/inventory", "POST", { id: "batch-rollback", name: "回滚食材", amount: "1000", unit: "g" });
+    await menuRecipe("batch-rollback-a", [{ name: "回滚食材", amount: "100g" }]);
+    await menuRecipe("batch-rollback-b", [{ name: "回滚食材", amount: "100g" }]);
+    const before = (await request("/api/history")).data.length;
+    const connection = new Database(process.env.KNOWINGRE_DB_PATH!);
+    connection.exec(`CREATE TRIGGER simulate_cook_failure BEFORE INSERT ON cook_history
+      WHEN NEW.recipe_id='batch-rollback-b' BEGIN SELECT RAISE(ABORT, 'simulated failure'); END`);
+    const originalError = console.error;
+    try {
+      console.error = () => {}; // This failure is intentional; verify its persisted effects below.
+      const result = await request("/api/cook-batch", "POST", { recipeIds: ["batch-rollback-a", "batch-rollback-b"] });
+      expect(result.status).toBe(500);
+    } finally {
+      console.error = originalError;
+      connection.exec("DROP TRIGGER simulate_cook_failure");
+      connection.close();
+    }
+    expect((await request("/api/menu")).data).toHaveLength(2);
+    expect((await request("/api/history")).data.length).toBe(before);
+    expect((await request("/api/inventory")).data.find((item: any) => item.id === "batch-rollback").amount).toBe("1000");
+    const recipes = (await request("/api/recipes")).data;
+    expect(recipes.find((item: any) => item.id === "batch-rollback-a").cookedDates).toEqual([]);
+    expect(recipes.find((item: any) => item.id === "batch-rollback-b").cookedDates).toEqual([]);
+  });
+
+  test("keeps family batch cooking separate from personal inventory and records the actor", async () => {
+    const member = await request("/api/auth/register", "POST", { username: "批量家庭成员", password: "test1234" });
+    const memberToken = member.data.token;
+    await request("/api/family/create", "POST", { name: "批量测试家庭" }, memberToken);
+    await request("/api/inventory", "POST", { id: "batch-family-personal", name: "家庭测试食材", amount: "1000", unit: "g" }, memberToken);
+    await request("/api/inventory?scope=family", "POST", { id: "batch-family-shared", name: "家庭测试食材", amount: "500", unit: "g" }, memberToken);
+    const ids = ["batch-family-a", "batch-family-b"];
+    for (const id of ids) {
+      await request("/api/recipes?scope=family", "POST", { id, name: id, ingredients: [{ name: "家庭测试食材", amount: "100g" }], steps: [] }, memberToken);
+      await request(`/api/menu/${id}?scope=family`, "POST", {}, memberToken);
+    }
+    const preview = await request("/api/cook-batch/preview?scope=family", "POST", { recipeIds: ids }, memberToken);
+    expect(preview.status).toBe(200);
+    expect((await request("/api/cook-batch?scope=family", "POST", { recipeIds: ids, snapshot: preview.data.snapshot }, memberToken)).status).toBe(200);
+    expect((await request("/api/inventory?scope=family", "GET", undefined, memberToken)).data.find((item: any) => item.id === "batch-family-shared").amount).toBe("300");
+    expect((await request("/api/inventory", "GET", undefined, memberToken)).data.find((item: any) => item.id === "batch-family-personal").amount).toBe("1000");
+    expect((await request("/api/menu?scope=family", "GET", undefined, memberToken)).data).toHaveLength(0);
+    const history = (await request("/api/history?scope=family", "GET", undefined, memberToken)).data;
+    expect(history).toHaveLength(2);
+    expect(history.every((record: any) => record.username === "批量家庭成员")).toBe(true);
   });
 });
 

@@ -2396,16 +2396,27 @@ async function refreshCookData(d) {
   d.history = history;
 }
 
-async function showCookDoneDialog(recipeId, suppliedPreview = null) {
+let cookingDialogOpen = false;
+async function showCookDoneDialog(recipeId, suppliedPreview = null, draft = null) {
+  if (cookingDialogOpen) return;
   const d = getData();
-  const recipe = d.recipes.find(r => r.id === recipeId);
-  if (!recipe) return;
+  const batch = Array.isArray(recipeId);
+  const recipeIds = batch ? recipeId : [recipeId];
+  const recipes = recipeIds.map(id => d.recipes.find(r => r.id === id));
+  if (!recipes.length || recipes.some(recipe => !recipe)) return;
+  const title = batch ? `全部做完（${recipes.length} 道菜）` : recipes[0].name;
+  const endpoint = batch ? '/api/cook-batch' : `/api/cook/${recipeId}`;
+  const requestBody = batch ? { recipeIds } : {};
+  const dialogScope = currentScope;
+  const cookPath = path => dialogScope === 'family' ? path + '?scope=family' : path;
+  cookingDialogOpen = true;
 
   let preview = suppliedPreview;
   if (!preview) {
     try {
-      preview = await apiFetch(scoped(`/api/cook/${recipeId}/preview`), { method: 'POST' });
+      preview = await apiFetch(cookPath(endpoint + '/preview'), { method: 'POST', body: requestBody });
     } catch (err) {
+      cookingDialogOpen = false;
       showToast('无法计算库存扣减: ' + err.message, 'error');
       return;
     }
@@ -2421,7 +2432,7 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
     if (m.status === 'ready' && (m.conversionSource === 'universal' || m.conversionSource === 'custom')) {
       note = `<div class="done-conversion-note done-conversion-note--ok">自动换算后扣减 ${esc(String(m.convertedNeeded))}${m.inventoryUnit ? ' ' + esc(m.inventoryUnit) : ''}</div>`;
     } else if (m.status === 'unparsed-recipe') {
-      note = '<div class="done-conversion-note">菜谱用量无法量化，本次默认保持库存不变</div>';
+      note = '<div class="done-conversion-note done-conversion-note--warn">菜谱用量无法量化，请填写剩余量，或勾选本次保持不变</div>';
     } else if (m.status === 'ambiguous-recipe') {
       note = '<div class="done-conversion-note done-conversion-note--warn">菜谱使用了区间或模糊数量，请手动确认做完后的剩余库存</div>';
     } else if (m.status === 'unparsed-inventory') {
@@ -2438,6 +2449,10 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
           <button type="button" class="btn btn-xs" data-save-conversion>保存并计算</button>
         </div>` : ''}`;
     }
+    if (m.insufficient) {
+      note += '<div class="done-conversion-note done-conversion-note--warn">菜谱合计用量超过当前库存，默认扣至 0；请按实际剩余量调整后确认。</div>';
+    }
+    const needsReview = m.status !== 'ready';
     return `
     <div class="done-item" data-name="${escAttr(m.name)}" data-inventory-id="${escAttr(m.inventoryId)}">
       <div class="done-item-head">
@@ -2455,12 +2470,15 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
         <label class="done-field">
           <span>用完剩余</span>
           <div class="inv-row" style="gap:4px">
-            <input type="text" class="done-remaining" value="${escAttr(m.remaining)}" placeholder="剩余" style="flex:1;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
+            <input type="text" class="done-remaining" value="${escAttr(needsReview ? '' : m.remaining)}" placeholder="${needsReview ? '请填写剩余量' : '剩余'}" style="flex:1;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
             <input type="text" class="done-unit" value="${escAttr(m.inventoryUnit || '')}" placeholder="单位" style="width:60px;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
           </div>
         </label>
         <label class="done-remove-cb">
           <input type="checkbox" class="done-remove-check"> 直接移除该项
+        </label>
+        <label class="done-remove-cb done-keep-cb">
+          <input type="checkbox" class="done-skip-check"> 本次保持不变
         </label>
       </div>
     </div>
@@ -2470,6 +2488,8 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
     itemsHtml = '<p style="color:var(--text-muted);font-size:0.88rem">没有匹配到可扣减的库存，仍可将菜谱标记为做完。</p>';
   }
 
+  const missing = [...new Set(preview.items.filter(item => !item.inventoryId).map(item => item.name))];
+  const missingHtml = missing.length ? `<div class="done-conversion-note done-conversion-note--warn">未找到库存：${esc(missing.join('、'))}。这些食材只记录做菜，不扣减库存。</div>` : '';
   const pantryHtml = pantryItems.length
     ? `<div class="done-conversion-note done-conversion-note--ok" style="margin:0 0 14px">${esc(pantryItems.map(item => item.name).join('、'))}属于常备调料，本次只检查库存，不扣减数量。</div>`
     : '';
@@ -2477,19 +2497,20 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
   overlay.innerHTML = `
     <div class="modal" style="animation:modalIn 0.25s var(--ease-out);max-width:580px">
       <div class="modal-header">
-        <h2 style="font-size:1rem">🍽️ ${esc(recipe.name)}</h2>
+        <h2 style="font-size:1rem">🍽️ ${esc(title)}</h2>
         <button class="btn-icon modal-close" id="doneClose" style="border:none;background:none;cursor:pointer;font-size:1.2rem">×</button>
       </div>
       <div class="modal-body">
-        <p style="margin-bottom:16px;color:var(--text-muted);font-size:0.85rem">已按单位自动计算；无法换算的食材请确认剩余量。留空则保持不变。</p>
+        <p style="margin-bottom:16px;color:var(--text-muted);font-size:0.85rem">${batch ? `本次菜品：${esc(recipes.map(recipe => recipe.name).join('、'))}。同一食材已合并计算，只扣减一次。` : '已按单位计算用量。'} 无法换算的食材请填写剩余量，或勾选本次保持不变。</p>
+        ${missingHtml}
         ${pantryHtml}
         <div class="done-list">${itemsHtml}</div>
         <label class="done-cook-notes">
-          <span>这次做菜的备注（可选）</span>
+          <span>${batch ? '本次做菜的备注（用于每道菜，可选）' : '这次做菜的备注（可选）'}</span>
           <textarea id="doneNotes" rows="3" maxlength="1000" placeholder="例如：少放一点盐更合适，火候可以再短两分钟"></textarea>
         </label>
         <div style="display:flex;gap:8px;margin-top:20px">
-          <button class="btn btn-primary" id="doneConfirm">确认做完</button>
+          <button class="btn btn-primary" id="doneConfirm">${batch ? '确认全部做完' : '确认做完'}</button>
           <button class="btn" id="doneCancel">取消</button>
         </div>
       </div>
@@ -2504,15 +2525,54 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
     if (first) first.focus();
   });
 
-  // Checkbox → disable amount inputs
-  overlay.querySelectorAll('.done-remove-check').forEach(cb => {
-    cb.addEventListener('change', () => {
-      const row = cb.closest('.done-item');
-      row.querySelector('.done-remaining').disabled = cb.checked;
-      row.querySelector('.done-unit').disabled = cb.checked;
-      row.querySelectorAll('.done-conversion-factor, [data-save-conversion]').forEach(el => { el.disabled = cb.checked; });
+  let busy = false;
+  function syncRow(row) {
+    const disabled = row.querySelector('.done-remove-check').checked || row.querySelector('.done-skip-check').checked;
+    row.querySelectorAll('.done-remaining, .done-unit, .done-conversion-factor, [data-save-conversion]').forEach(el => { el.disabled = disabled; });
+  }
+  function setBusy(value) {
+    busy = value;
+    overlay.querySelectorAll('button, input, textarea').forEach(el => { el.disabled = value; });
+    if (!value) overlay.querySelectorAll('.done-item').forEach(syncRow);
+  }
+  overlay.querySelectorAll('.done-item').forEach(row => {
+    row.addEventListener('input', event => {
+      if (event.target.matches('.done-remaining, .done-unit')) row.dataset.edited = '1';
+    });
+    row.querySelectorAll('.done-remove-check, .done-skip-check').forEach(checkbox => {
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) row.querySelector(checkbox.matches('.done-remove-check') ? '.done-skip-check' : '.done-remove-check').checked = false;
+        row.dataset.edited = '1';
+        syncRow(row);
+      });
     });
   });
+  function collectDraft() {
+    return {
+      notes: overlay.querySelector('#doneNotes').value,
+      rows: [...overlay.querySelectorAll('.done-item[data-edited]')].map(row => ({
+        id: row.dataset.inventoryId,
+        version: matched.find(item => item.inventoryId === row.dataset.inventoryId)?.inventoryVersion,
+        remaining: row.querySelector('.done-remaining').value,
+        unit: row.querySelector('.done-unit').value,
+        remove: row.querySelector('.done-remove-check').checked,
+        skip: row.querySelector('.done-skip-check').checked,
+      })),
+    };
+  }
+  if (draft) {
+    overlay.querySelector('#doneNotes').value = draft.notes;
+    overlay.querySelectorAll('.done-item').forEach(row => {
+      const saved = draft.rows.find(item => item.id === row.dataset.inventoryId && item.version === matched.find(entry => entry.inventoryId === item.id)?.inventoryVersion);
+      if (!saved) return;
+      row.querySelector('.done-remaining').value = saved.remaining;
+      row.querySelector('.done-unit').value = saved.unit;
+      row.querySelector('.done-remove-check').checked = saved.remove;
+      row.querySelector('.done-skip-check').checked = saved.skip;
+      row.dataset.edited = '1';
+      syncRow(row);
+    });
+  }
 
   overlay.querySelectorAll('[data-save-conversion]').forEach(button => {
     button.addEventListener('click', async () => {
@@ -2523,59 +2583,76 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null) {
         showToast('请输入大于 0 的换算值', 'error');
         return;
       }
-      button.disabled = true;
+      if (busy) return;
+      const savedDraft = collectDraft();
+      setBusy(true);
       try {
-        await apiFetch(scoped('/api/unit-conversions'), {
+        await apiFetch(cookPath('/api/unit-conversions'), {
           method: 'POST',
           body: {
-            ingredientName: item.name,
+            ingredientName: item.conversionIngredientName || item.name,
             fromUnit: item.conversionPrompt.fromUnit,
             toUnit: item.conversionPrompt.toUnit,
             factor,
           }
         });
         showToast(`已记住 ${item.name} 的单位换算`, 'success');
+        setBusy(false);
         close();
-        await showCookDoneDialog(recipeId);
+        if (currentScope === dialogScope) await showCookDoneDialog(recipeId, null, savedDraft);
       } catch (err) {
-        button.disabled = false;
+        setBusy(false);
         showToast('保存换算失败: ' + err.message, 'error');
       }
     });
   });
 
   const close = () => {
+    if (busy) return;
+    cookingDialogOpen = false;
     overlay.remove();
     if (prevFocus && document.contains(prevFocus) && typeof prevFocus.focus === 'function') prevFocus.focus();
   };
   overlay.querySelector('#doneClose').onclick = close;
   overlay.querySelector('#doneCancel').onclick = close;
   overlay.querySelector('#doneConfirm').onclick = async () => {
-    // Collect deductions
+    if (busy) return;
+    if (currentScope !== dialogScope) { close(); showToast('范围已切换，请重新确认', 'error'); return; }
     const deductions = [];
-    const notes = overlay.querySelector('#doneNotes').value.trim();
-    overlay.querySelectorAll('.done-item').forEach(item => {
-      const remove = item.querySelector('.done-remove-check').checked;
-      const remaining = item.querySelector('.done-remaining').value.trim();
-      const unit = item.querySelector('.done-unit').value.trim();
+    for (const row of overlay.querySelectorAll('.done-item')) {
+      const item = matched.find(entry => entry.inventoryId === row.dataset.inventoryId);
+      const remove = row.querySelector('.done-remove-check').checked;
+      const skip = row.querySelector('.done-skip-check').checked;
+      const remaining = row.querySelector('.done-remaining').value.trim();
+      if (item.status !== 'ready' && !remove && !skip && !remaining) {
+        showToast(`请确认“${item.name}”的剩余量，或勾选本次保持不变`, 'error');
+        return;
+      }
       deductions.push({
-        name: item.dataset.name,
-        inventoryId: item.dataset.inventoryId,
-        inventoryVersion: matched.find(entry => entry.inventoryId === item.dataset.inventoryId)?.inventoryVersion ?? null,
-        remove,
-        remaining,
-        unit
+        name: item.name, inventoryId: item.inventoryId, inventoryVersion: item.inventoryVersion,
+        remove, remaining: skip ? '' : remaining, unit: row.querySelector('.done-unit').value.trim(),
       });
-    });
-
+    }
+    setBusy(true);
     try {
-      await apiFetch(scoped(`/api/cook/${recipe.id}`), { method: 'POST', body: { deductions, notes } });
-      await refreshCookData(d);
-    } catch (err) { showToast('操作失败: ' + err.message, 'error'); close(); return; }
-
+      await apiFetch(cookPath(endpoint), { method: 'POST', body: {
+        ...requestBody, snapshot: preview.snapshot, deductions, notes: overlay.querySelector('#doneNotes').value.trim(),
+      } });
+    } catch (error) {
+      setBusy(false);
+      showToast('操作失败: ' + error.message, 'error');
+      return;
+    }
+    setBusy(false);
     close();
-    renderCurrentTab();
-    showToast(`✓ ${recipe.name} 已完成，库存已更新`, 'success');
+    try {
+      await refreshCookData(d);
+      renderCurrentTab();
+      updateStats();
+      showToast(`✓ ${title}已完成，库存已更新`, 'success');
+    } catch (error) {
+      showToast('做菜记录已保存，但页面刷新失败，请刷新页面查看，勿重复提交', 'error');
+    }
   };
 }
 
@@ -3234,46 +3311,11 @@ async function init() {
     }
   });
 
-  // Cook all — deduct inventory for all menu recipes, mark cooked, clear menu
-  document.getElementById('btnCookAll').addEventListener('click', async () => {
-    const d = getData();
-    const menuRecipes = d.recipes.filter(r => d.todayMenu.includes(r.id));
-    if (!menuRecipes.length) return;
-    let previews;
-    try {
-      previews = await Promise.all(menuRecipes.map(async recipe => ({
-        recipe,
-        preview: await apiFetch(scoped(`/api/cook/${recipe.id}/preview`), { method: 'POST' })
-      })));
-    } catch (err) {
-      showToast('无法预览库存扣减: ' + err.message, 'error');
-      return;
-    }
-    const unresolved = previews.find(item => item.preview.requiresConfirmation);
-    if (unresolved) {
-      showToast(`“${unresolved.recipe.name}”有单位需要确认，请先处理这道菜`, 'info');
-      await showCookDoneDialog(unresolved.recipe.id, unresolved.preview);
-      return;
-    }
-    const ok = await customConfirm({
-      title: '全部做完',
-      message: `把这 ${menuRecipes.length} 道菜标记为做完，按菜谱默认用量扣减主食材库存，并清空今日菜单。`,
-      details: menuRecipes.map(r => r.name),
-      warning: '此操作不可撤销',
-      confirmText: '全部做完',
-      type: 'danger',
-    });
-    if (!ok) return;
-
-    try {
-      for (const recipe of menuRecipes) {
-        await apiFetch(scoped(`/api/cook/${recipe.id}`), { method: 'POST' });
-      }
-      await refreshCookData(d);
-    } catch (err) { showToast('操作失败: ' + err.message, 'error'); return; }
-
-    renderMenu();
-    updateStats();
+  // Preview and commit the whole menu together, with one remaining amount per stock.
+  document.getElementById('btnCookAll').addEventListener('click', async (event) => {
+    const recipeIds = [...getData().todayMenu];
+    if (!recipeIds.length || cookingDialogOpen) return;
+    await withLoading(event.currentTarget, () => showCookDoneDialog(recipeIds));
   });
 
   // Clear menu

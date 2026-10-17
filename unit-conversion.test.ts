@@ -26,7 +26,30 @@ describe("unit conversion", () => {
     }).remaining).toBe("90");
     expect(calculateDeduction({
       ingredientName: "鸡蛋", recipeAmount: "100g", inventoryAmount: "5", inventoryUnit: "个", rules,
-    }).remaining).toBe("3");
+    }).remaining).toBe("3.181818");
+  });
+
+  test("composes ingredient rules with universal units and preserves partial pieces", () => {
+    const rules = [{ ingredient_key: "番茄", from_unit: "个", to_unit: "g", factor: 200 }];
+    expect(calculateDeduction({ ingredientName: "番茄", recipeAmount: "0.1kg", inventoryAmount: "3", inventoryUnit: "个", rules }))
+      .toMatchObject({ status: "ready", convertedNeeded: 0.5, remaining: "2.5" });
+    expect(calculateDeduction({ ingredientName: "番茄", recipeAmount: "2个", inventoryAmount: "1", inventoryUnit: "kg", rules }))
+      .toMatchObject({ status: "ready", convertedNeeded: 0.4, remaining: "0.6" });
+    expect(calculateDeduction({ ingredientName: "番茄", recipeAmount: "500g", inventoryAmount: "2", inventoryUnit: "袋",
+      rules: [{ ingredient_key: "番茄", from_unit: "袋", to_unit: "kg", factor: 1 }] }))
+      .toMatchObject({ status: "ready", remaining: "1.5" });
+    expect(calculateDeduction({ ingredientName: "土豆", recipeAmount: "100g", inventoryAmount: "3", inventoryUnit: "个", rules }).status)
+      .toBe("needs-conversion");
+  });
+
+  test("requires review for missing units instead of assuming the inventory unit", () => {
+    expect(calculateDeduction({ ingredientName: "鸡蛋", recipeAmount: "2", inventoryAmount: "3", inventoryUnit: "个" }).status)
+      .toBe("needs-conversion");
+  });
+
+  test("reconciles embedded units with a separate unit without silently changing quantities", () => {
+    expect(parseQuantity("1kg", "g")).toMatchObject({ value: 1000, normalizedUnit: "g", ambiguous: false });
+    expect(parseQuantity("2个", "g").ambiguous).toBe(true);
   });
 
   test("requires confirmation when no cross-dimension rule exists", () => {

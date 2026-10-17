@@ -28,7 +28,7 @@ export interface DeductionResult {
   neededUnit: string;
   convertedNeeded: number | null;
   remaining: string;
-  conversionSource: "same-unit" | "universal" | "custom" | "assumed" | null;
+  conversionSource: "same-unit" | "universal" | "custom" | null;
   conversionPrompt?: { fromUnit: string; toUnit: string };
 }
 
@@ -130,6 +130,14 @@ export function parseQuantity(amount: unknown, separateUnit = ""): ParsedQuantit
 
   const textUnit = consumed ? raw.slice(consumed.length).trim() : "";
   const unit = explicitUnit || textUnit;
+  if (value !== null && !Number.isFinite(value)) value = null;
+  // Historical data can include both "1kg" and a separate "g" unit.
+  // Convert compatible units rather than silently reading this as 1g.
+  if (value !== null && textUnit && explicitUnit && normalizeUnit(textUnit) !== normalizeUnit(explicitUnit)) {
+    const converted = universalConversion(value, textUnit, explicitUnit);
+    if (converted === null) ambiguous = true;
+    else value = converted;
+  }
   return { value, unit, normalizedUnit: normalizeUnit(unit), ambiguous };
 }
 
@@ -145,22 +153,33 @@ function universalConversion(value: number, fromUnit: string, toUnit: string): n
   return value * from.toBase / to.toBase;
 }
 
-function matchingRule(
+function convertWithRule(
+  value: number,
   ingredientName: string,
   fromUnit: string,
   toUnit: string,
   rules: UnitConversionRule[],
-): { factor: number; inverse: boolean } | null {
+): number | null {
   const ingredientKey = normalizeIngredientKey(ingredientName);
   const from = normalizeUnit(fromUnit);
   const to = normalizeUnit(toUnit);
   for (const rule of rules) {
     const ruleKey = rule.ingredient_key || normalizeIngredientKey(rule.ingredient_name || "");
-    if (ruleKey !== ingredientKey || !(Number(rule.factor) > 0)) continue;
+    if (ruleKey !== ingredientKey || !Number.isFinite(Number(rule.factor)) || !(Number(rule.factor) > 0)) continue;
     const ruleFrom = normalizeUnit(rule.from_unit);
     const ruleTo = normalizeUnit(rule.to_unit);
-    if (ruleFrom === from && ruleTo === to) return { factor: Number(rule.factor), inverse: false };
-    if (ruleFrom === to && ruleTo === from) return { factor: Number(rule.factor), inverse: true };
+    // One ingredient-specific bridge may have universal conversions on either
+    // side: 1袋=500g also supports 袋 -> kg and kg -> 袋.
+    for (const [start, end, factor] of [
+      [ruleFrom, ruleTo, Number(rule.factor)],
+      [ruleTo, ruleFrom, 1 / Number(rule.factor)],
+    ] as const) {
+      const atStart = from === start ? value : universalConversion(value, from, start);
+      if (atStart === null) continue;
+      const atEnd = atStart * factor;
+      const result = end === to ? atEnd : universalConversion(atEnd, end, to);
+      if (result !== null && Number.isFinite(result)) return result;
+    }
   }
   return null;
 }
@@ -187,7 +206,7 @@ export function calculateDeduction(input: {
   const needed = parseQuantity(input.recipeAmount, input.recipeUnit || "");
   const stock = parseQuantity(input.inventoryAmount, input.inventoryUnit || "");
   const stockUnit = stock.unit || String(input.inventoryUnit || "").trim();
-  let neededUnit = needed.unit;
+  const neededUnit = needed.unit;
 
   if (stock.value === null || stock.ambiguous) {
     return {
@@ -214,25 +233,17 @@ export function calculateDeduction(input: {
   let converted: number | null = null;
   let source: DeductionResult["conversionSource"] = null;
   const normalizedStockUnit = normalizeUnit(stockUnit);
-  let normalizedNeededUnit = normalizeUnit(neededUnit);
+  const normalizedNeededUnit = normalizeUnit(neededUnit);
 
-  if (!normalizedNeededUnit && normalizedStockUnit) {
-    neededUnit = stockUnit;
-    normalizedNeededUnit = normalizedStockUnit;
-    converted = needed.value;
-    source = "assumed";
-  } else if (normalizedNeededUnit === normalizedStockUnit) {
+  if (normalizedNeededUnit && normalizedNeededUnit === normalizedStockUnit) {
     converted = needed.value;
     source = "same-unit";
   } else if (normalizedNeededUnit && normalizedStockUnit) {
     converted = universalConversion(needed.value, neededUnit, stockUnit);
     if (converted !== null) source = "universal";
     if (converted === null) {
-      const rule = matchingRule(input.ingredientName, neededUnit, stockUnit, input.rules || []);
-      if (rule) {
-        converted = rule.inverse ? needed.value / rule.factor : needed.value * rule.factor;
-        source = "custom";
-      }
+      converted = convertWithRule(needed.value, input.ingredientName, neededUnit, stockUnit, input.rules || []);
+      if (converted !== null) source = "custom";
     }
   }
 
@@ -245,11 +256,7 @@ export function calculateDeduction(input: {
     };
   }
 
-  const stockDef = getUnitDefinition(stockUnit);
-  const neededDef = getUnitDefinition(neededUnit);
-  if (stockDef?.dimension === "count" && neededDef?.dimension !== "count") {
-    converted = Math.ceil(converted);
-  }
+  // Preserve fractions: rounding each recipe up over-deducts shared ingredients.
   const remaining = Math.max(0, stock.value - converted);
   return {
     status: "ready", stockQuantity: stock.value, stockUnit,

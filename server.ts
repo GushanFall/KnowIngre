@@ -4,7 +4,8 @@ import { AI_GEN_PROMPT, AI_MODIFY_PROMPT, KITCHEN_ASSISTANT_PROMPT } from "./bac
 import { validateRecipePayload } from "./backend/recipes";
 import { corsHeaders, json, ensureArray } from "./backend/http";
 import { serveStatic } from "./backend/static";
-import { buildCookPlan, normalizeRecipeIngredients, parseAmount, findInventoryMatch, isPantryInventory } from "./backend/cooking";
+import { normalizeRecipeIngredients } from "./backend/cooking";
+import { cookRecipes, CookingError } from "./backend/cook-actions";
 import { createHmac, randomUUID } from "node:crypto";
 import {
   formatQuantity,
@@ -12,7 +13,6 @@ import {
   normalizeIngredientKey,
   normalizeUnit,
   parseQuantity,
-  type UnitConversionRule,
 } from "./unit-conversion";
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
@@ -1018,102 +1018,18 @@ export async function handle(req: Request): Promise<Response> {
     return json({ ok: true });
   }
 
-  // Cook
-  if (method === "POST" && path.startsWith("/api/cook/")) {
-    const recipeId = path.split("/")[3];
-    const isPreview = path.endsWith("/preview");
+  // Single dishes and the entire menu share the same atomic cooking logic.
+  if (method === "POST" && (path.startsWith("/api/cook/") || path === "/api/cook-batch" || path === "/api/cook-batch/preview")) {
     const body = await req.json().catch(() => ({}));
-    const notes = String(body.notes || "").trim();
-    if (notes.length > 1000) return json({ error: "备注不能超过1000个字符" }, 400);
-    const recipe = db.query(`SELECT * FROM recipes WHERE id = ? AND ${filterCol} = ?${extraWhere}`).get(recipeId, ownerId) as any;
-    if (!recipe) return json({ error: "菜谱不存在" }, 404);
-
-    const ingredients = JSON.parse(recipe.ingredients || "[]");
-    const inventory = db.query(`SELECT * FROM inventory WHERE ${filterCol} = ?${extraWhere}`).all(ownerId) as any[];
-    const conversionOwner = getConversionOwner(scope);
-    const conversions = db.query(`SELECT ingredient_key, ingredient_name, from_unit, to_unit, factor
-      FROM ingredient_unit_conversions WHERE owner_type=? AND owner_id=?`)
-      .all(conversionOwner.type, conversionOwner.id) as UnitConversionRule[];
-    const plan = buildCookPlan(ingredients, inventory, conversions);
-
-    if (isPreview) return json(plan);
-    if (!body.deductions && plan.requiresConfirmation) {
-      return json({ error: "部分食材单位无法自动换算，请确认剩余库存", requiresConfirmation: true, plan }, 409);
+    const batch = path === "/api/cook-batch" || path === "/api/cook-batch/preview";
+    const recipeIds = batch ? body?.recipeIds : [path.split("/")[3]];
+    try {
+      return json(cookRecipes(db, scope, recipeIds, body, path.endsWith("/preview"), batch));
+    } catch (error) {
+      if (error instanceof CookingError) return json({ error: error.message }, error.status);
+      console.error("Cooking transaction failed:", error);
+      return json({ error: "做菜记录保存失败，本次变更已回滚，请稍后重试" }, 500);
     }
-    if (Array.isArray(body.deductions)) {
-      const stale = body.deductions.find((deduction: any) => {
-        if (deduction.inventoryVersion === undefined || deduction.inventoryVersion === null) return false;
-        const current = deduction.inventoryId
-          ? inventory.find((item: any) => item.id === deduction.inventoryId)
-          : findInventoryMatch(deduction.name, inventory);
-        if (isPantryInventory(current)) return false;
-        return !current || Number(current.version || 1) !== Number(deduction.inventoryVersion);
-      });
-      if (stale) {
-        return json({ error: `“${stale.name || "食材"}”的库存已被其他成员修改，请重新打开确认窗口` }, 409);
-      }
-    }
-
-    const applyCook = db.transaction(() => {
-      if (body.deductions) {
-        for (const d of body.deductions) {
-          const inv = (d.inventoryId
-            ? inventory.find((item: any) => item.id === d.inventoryId)
-            : findInventoryMatch(d.name, inventory)) as any;
-          if (!inv) continue;
-          // Seasonings are pantry staples: recipes check their presence but cooking
-          // never changes their stock, even if an older client sends a deduction.
-          if (isPantryInventory(inv)) continue;
-          if (d.remove) {
-            db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?`).run(inv.id, ownerId);
-            continue;
-          }
-          const rawRemaining = String(d.remaining ?? "").trim();
-          if (!rawRemaining) continue;
-          const unit = String(d.unit || inv.unit || "").trim();
-          const amount = normalizeAmountForStorage(rawRemaining, unit);
-          const remainNum = parseAmount(amount);
-          if (remainNum !== null && remainNum <= 0) {
-            db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?`).run(inv.id, ownerId);
-          } else {
-            db.query(`UPDATE inventory SET amount=?, unit=?, version=COALESCE(version, 1)+1, updated_at=? WHERE id=? AND ${filterCol}=?`)
-              .run(amount, unit, new Date().toISOString(), inv.id, ownerId);
-          }
-        }
-      } else {
-        const grouped = new Map<string, { stockQuantity: number; convertedNeeded: number }>();
-        for (const item of plan.items) {
-          if (item.status !== "ready" || !item.inventoryId || item.stockQuantity === null || item.convertedNeeded === null) continue;
-          const current = grouped.get(item.inventoryId) || { stockQuantity: item.stockQuantity, convertedNeeded: 0 };
-          current.convertedNeeded += item.convertedNeeded;
-          grouped.set(item.inventoryId, current);
-        }
-        for (const [inventoryId, deduction] of grouped) {
-          const remaining = Math.max(0, deduction.stockQuantity - deduction.convertedNeeded);
-          if (remaining === 0) {
-            db.query(`DELETE FROM inventory WHERE id = ? AND ${filterCol} = ?`).run(inventoryId, ownerId);
-          } else {
-            db.query(`UPDATE inventory SET amount=?, version=COALESCE(version, 1)+1, updated_at=? WHERE id=? AND ${filterCol}=?`)
-              .run(formatQuantity(remaining), new Date().toISOString(), inventoryId, ownerId);
-          }
-        }
-      }
-
-      const cookedAt = new Date().toISOString();
-      const cooked = JSON.parse(recipe.cooked_dates || "[]");
-      cooked.push(cookedAt);
-      db.query("UPDATE recipes SET cooked_dates=?, updated_at=? WHERE id=?")
-        .run(JSON.stringify(cooked), new Date().toISOString(), recipeId);
-      db.query(`INSERT INTO cook_history
-        (id, recipe_id, recipe_name, user_id, family_id, cooked_at, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
-          randomUUID(), recipeId, recipe.name, userId, scope.familyId, cookedAt, notes,
-        );
-      db.query(`DELETE FROM today_menu WHERE ${filterCol} = ?${extraWhere} AND recipe_id = ?`).run(ownerId, recipeId);
-    });
-    applyCook();
-
-    return json({ ok: true, deductions: plan.items });
   }
 
   return json({ error: "Not found" }, 404);
