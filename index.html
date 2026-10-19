@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>知食分子 KnowIngre · 吃，是一门学问</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="ui.css">
 </head>
 <body>
   <div class="grain-overlay" aria-hidden="true"></div>
@@ -53,24 +54,33 @@
   <main class="content">
     <!-- 今日菜单 Tab -->
     <section class="tab-panel active" id="panel-menu">
-      <div class="page-header">
+      <div class="page-header meal-page-header">
         <div class="page-heading">
+          <p class="meal-date" id="menuDate"></p>
           <h2>今日菜单</h2>
-          <p>安排今天要做的菜，并自动整理所需食材</p>
+          <p>把想吃的安排好，再慢慢做一顿饭。</p>
         </div>
         <div class="page-actions">
           <span id="menuRecipeCount" class="text-sm text-muted"></span>
-          <button class="btn btn-sm btn-primary" id="btnCookAll" style="display:none"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span> 全部做完</button>
-          <button class="btn btn-sm btn-danger" id="btnClearMenu" style="display:none"><span class="icon icon-sm"><svg width="14" height="14" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span> 清空</button>
+          <button class="btn btn-primary" id="btnCookAll" style="display:none"><span class="icon icon-sm"><svg width="16" height="16" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span> 全部做完</button>
+          <button class="btn meal-clear" id="btnClearMenu" style="display:none">清空菜单</button>
         </div>
       </div>
-      <div id="menuContent">
-        <div class="empty-state" id="menuEmpty">
-          <p>还没有添加菜品</p>
-          <button class="btn btn-primary" id="btnGoToRecipes" style="margin-top:16px">去菜谱库添加</button>
+      <div id="menuContent" class="meal-layout">
+        <div class="meal-board">
+          <div class="meal-board-heading">
+            <div><span class="meal-eyebrow">餐桌安排</span><h3>这餐，准备做这些</h3></div>
+            <button type="button" class="btn btn-sm" data-tab-go="recipes">+ 添加菜品</button>
+          </div>
+          <div class="empty-state meal-empty" id="menuEmpty">
+            <svg class="meal-empty-art" viewBox="0 0 160 120" fill="none" aria-hidden="true"><ellipse cx="80" cy="88" rx="57" ry="13" stroke="currentColor"/><path d="M35 77h90c-5 24-24 32-45 32S40 101 35 77Z" fill="currentColor" opacity=".1"/><path d="M35 77c5 24 24 32 45 32s40-8 45-32M80 72V30m0 25c-21 0-30-12-28-26 18 0 28 9 28 26Zm0-12c0-17 12-27 29-25 0 16-10 25-29 25Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <h3>今天的菜单还空着</h3>
+            <p>从喜欢的菜里挑几道，食材清单会自动整理好。</p>
+            <div class="meal-empty-actions"><button type="button" class="btn btn-primary" id="btnGoToRecipes">去菜谱库挑选</button><button type="button" class="btn" data-tab-go="inventory">看看现有食材</button></div>
+          </div>
+          <div id="menuRecipeList"></div>
         </div>
-        <div id="menuRecipeList"></div>
-        <div id="menuShoppingList"></div>
+        <aside id="menuShoppingList" aria-label="备料清单"></aside>
       </div>
     </section>
 

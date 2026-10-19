@@ -1,6 +1,7 @@
 import { API_BASE, USER_KEY, getToken, clearToken, apiFetch } from './frontend/api.js';
 import { downloadBlob, downloadDatabaseBackup } from './frontend/download.js';
 import { safeParseJSON, validateAiRecipe } from './frontend/ai-recipe.js';
+import { ingredientReadiness } from './frontend/menu-readiness.js';
 
 let dataCache = null;
 
@@ -197,7 +198,7 @@ function renderCurrentTab() {
 function updateKitchenFabMode() {
   const button = document.getElementById('btnKitchenAssistant');
   if (!button) return;
-  button.classList.toggle('is-compact', currentTab === 'history' && window.scrollY > 160);
+  button.classList.toggle('is-compact', currentTab === 'menu' || (currentTab === 'history' && window.scrollY > 160));
 }
 
 window.addEventListener('scroll', updateKitchenFabMode, { passive: true });
@@ -2425,14 +2426,14 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null, draft = null
   const matched = preview.items.filter(item => item.inventoryId && !item.skipDeduction);
 
   const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
+  overlay.className = 'modal-overlay cook-overlay';
   overlay.style.zIndex = '300';
   let itemsHtml = matched.map(m => {
     let note = '';
     if (m.status === 'ready' && (m.conversionSource === 'universal' || m.conversionSource === 'custom')) {
       note = `<div class="done-conversion-note done-conversion-note--ok">自动换算后扣减 ${esc(String(m.convertedNeeded))}${m.inventoryUnit ? ' ' + esc(m.inventoryUnit) : ''}</div>`;
     } else if (m.status === 'unparsed-recipe') {
-      note = '<div class="done-conversion-note done-conversion-note--warn">菜谱用量无法量化，请填写剩余量，或勾选本次保持不变</div>';
+      note = '<div class="done-conversion-note done-conversion-note--warn">菜谱用量无法量化，请填写剩余量，或选择本次保持不变</div>';
     } else if (m.status === 'ambiguous-recipe') {
       note = '<div class="done-conversion-note done-conversion-note--warn">菜谱使用了区间或模糊数量，请手动确认做完后的剩余库存</div>';
     } else if (m.status === 'unparsed-inventory') {
@@ -2453,100 +2454,85 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null, draft = null
       note += '<div class="done-conversion-note done-conversion-note--warn">菜谱合计用量超过当前库存，默认扣至 0；请按实际剩余量调整后确认。</div>';
     }
     const needsReview = m.status !== 'ready';
+    const stockText = `${m.inventoryAmount}${m.inventoryUnit ? ' ' + m.inventoryUnit : ''}`;
+    const remainingText = needsReview ? '待确认' : `${m.remaining}${m.inventoryUnit ? ' ' + m.inventoryUnit : ''}`;
     return `
-    <div class="done-item" data-name="${escAttr(m.name)}" data-inventory-id="${escAttr(m.inventoryId)}">
-      <div class="done-item-head">
-        <span class="done-item-name">${esc(m.name)}</span>
-        <span class="done-item-need">菜谱需: ${esc(m.recipeAmount || '—')}</span>
-      </div>
-      ${note}
-      <div class="done-item-edit">
-        <label class="done-field">
-          <span>当前库存</span>
-          <div class="done-stock">
-            <span class="done-stock-val">${esc(String(m.inventoryAmount))}${m.inventoryUnit ? ' ' + esc(m.inventoryUnit) : ''}</span>
-          </div>
-        </label>
-        <label class="done-field">
-          <span>用完剩余</span>
-          <div class="inv-row" style="gap:4px">
-            <input type="text" class="done-remaining" value="${escAttr(needsReview ? '' : m.remaining)}" placeholder="${needsReview ? '请填写剩余量' : '剩余'}" style="flex:1;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
-            <input type="text" class="done-unit" value="${escAttr(m.inventoryUnit || '')}" placeholder="单位" style="width:60px;padding:6px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit">
-          </div>
-        </label>
-        <label class="done-remove-cb">
-          <input type="checkbox" class="done-remove-check"> 直接移除该项
-        </label>
-        <label class="done-remove-cb done-keep-cb">
-          <input type="checkbox" class="done-skip-check"> 本次保持不变
-        </label>
-      </div>
-    </div>
-  `}).join('');
-
-  if (!itemsHtml) {
-    itemsHtml = '<p style="color:var(--text-muted);font-size:0.88rem">没有匹配到可扣减的库存，仍可将菜谱标记为做完。</p>';
-  }
-
-  const missing = [...new Set(preview.items.filter(item => !item.inventoryId).map(item => item.name))];
-  const missingHtml = missing.length ? `<div class="done-conversion-note done-conversion-note--warn">未找到库存：${esc(missing.join('、'))}。这些食材只记录做菜，不扣减库存。</div>` : '';
-  const pantryHtml = pantryItems.length
-    ? `<div class="done-conversion-note done-conversion-note--ok" style="margin:0 0 14px">${esc(pantryItems.map(item => item.name).join('、'))}属于常备调料，本次只检查库存，不扣减数量。</div>`
-    : '';
-
-  overlay.innerHTML = `
-    <div class="modal" style="animation:modalIn 0.25s var(--ease-out);max-width:580px">
-      <div class="modal-header">
-        <h2 style="font-size:1rem">🍽️ ${esc(title)}</h2>
-        <button class="btn-icon modal-close" id="doneClose" style="border:none;background:none;cursor:pointer;font-size:1.2rem">×</button>
-      </div>
-      <div class="modal-body">
-        <p style="margin-bottom:16px;color:var(--text-muted);font-size:0.85rem">${batch ? `本次菜品：${esc(recipes.map(recipe => recipe.name).join('、'))}。同一食材已合并计算，只扣减一次。` : '已按单位计算用量。'} 无法换算的食材请填写剩余量，或勾选本次保持不变。</p>
-        ${missingHtml}
-        ${pantryHtml}
-        <div class="done-list">${itemsHtml}</div>
-        <label class="done-cook-notes">
-          <span>${batch ? '本次做菜的备注（用于每道菜，可选）' : '这次做菜的备注（可选）'}</span>
-          <textarea id="doneNotes" rows="3" maxlength="1000" placeholder="例如：少放一点盐更合适，火候可以再短两分钟"></textarea>
-        </label>
-        <div style="display:flex;gap:8px;margin-top:20px">
-          <button class="btn btn-primary" id="doneConfirm">${batch ? '确认全部做完' : '确认做完'}</button>
-          <button class="btn" id="doneCancel">取消</button>
+    <details class="done-item" data-name="${escAttr(m.name)}" data-inventory-id="${escAttr(m.inventoryId)}" ${needsReview || m.insufficient ? 'open' : ''}>
+      <summary class="cook-line"><strong>${esc(m.name)}</strong><span class="cook-balance"><span>${esc(stockText)}</span><span aria-hidden="true">→</span><strong class="cook-remaining-preview">${esc(remainingText)}</strong></span><span class="cook-edit-caption"></span></summary>
+      <div class="cook-adjust-body">
+        <p class="cook-recipe-amount">菜谱合计需要 ${esc(m.recipeAmount || '—')}</p>
+        ${note}
+        <div class="done-item-edit">
+          <label class="done-field"><span>当前库存</span><span class="done-stock-val">${esc(stockText)}</span></label>
+          <label class="done-field"><span>用完剩余</span><span class="inv-row"><input type="text" inputmode="decimal" class="done-remaining" value="${escAttr(needsReview ? '' : m.remaining)}" placeholder="${needsReview ? '请填写剩余量' : '剩余'}"><input type="text" class="done-unit" value="${escAttr(m.inventoryUnit || '')}" placeholder="单位" aria-label="${escAttr(m.name)}的剩余单位"></span></label>
+          <label class="done-field cook-action-field"><span>本次怎么处理</span><select class="done-action"><option value="deduct">按实际剩余量更新</option><option value="skip">本次保持库存不变</option><option value="remove">已经用完，移除库存</option></select></label>
+          <input type="checkbox" class="done-remove-check" hidden><input type="checkbox" class="done-skip-check" hidden>
         </div>
       </div>
-    </div>
-  `;
+    </details>`;
+  }).join('');
+  if (!itemsHtml) itemsHtml = '<p class="prep-empty-text">没有需要扣减的库存，确认后只记录本次做菜。</p>';
+  const missing = [...new Set(preview.items.filter(item => !item.inventoryId).map(item => item.name))];
+  const missingHtml = missing.length ? `<div class="done-conversion-note done-conversion-note--warn">未找到库存：${esc(missing.join('、'))}。这些食材只记录做菜，不扣减库存。</div>` : '';
+  const pantryHtml = pantryItems.length ? `<div class="done-conversion-note done-conversion-note--ok">常备调料 ${esc(pantryItems.map(item => item.name).join('、'))} 本次不扣减。</div>` : '';
+  overlay.innerHTML = `
+    <div class="modal cook-dialog">
+      <div class="modal-header"><div class="cook-dialog-heading">${iconSvg('cook')}<div><span class="meal-eyebrow">完成这顿饭</span><h2 id="cookDialogTitle">${esc(title)}</h2></div></div><button type="button" class="btn-icon modal-close" id="doneClose" aria-label="关闭做菜确认">${iconSvg('xmark')}</button></div>
+      <div class="modal-body">
+        <p class="cook-intro">${batch ? `${esc(recipes.map(recipe => recipe.name).join('、'))}。同一食材已合并计算。` : '按菜谱用量计算，点击食材可调整。'}<br>看看剩余量是否合适，再记下这顿饭。</p>
+        ${missingHtml}${pantryHtml}
+        ${matched.length ? '<div class="cook-list-labels"><span>食材</span><span>当前库存 → 做完剩余</span></div>' : ''}<div class="done-list">${itemsHtml}</div>
+        <details class="cook-notes"><summary>给这顿饭留句备注 <span>可选${batch ? ' · 用于每道菜' : ''}</span></summary><label class="done-cook-notes"><span class="sr-only">这次做菜的备注</span><textarea id="doneNotes" rows="3" maxlength="1000" placeholder="例如：少放一点盐更合适，下次再试试"></textarea></label></details>
+        <div class="cook-error" id="cookError" hidden role="alert"><span></span><button type="button" class="btn btn-sm" id="doneRefresh">重新计算</button></div>
+      </div>
+      <div class="cook-dialog-footer"><span class="cook-feedback" role="status"></span><div><button type="button" class="btn" id="doneCancel">再看看</button><button type="button" class="btn btn-primary" id="doneConfirm">${batch ? '确认全部做完' : '确认做完'}</button></div></div>
+    </div>`;
   const prevFocus = document.activeElement;
   document.body.appendChild(overlay);
   overlay.setAttribute('role', 'dialog');
   overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-labelledby', 'cookDialogTitle');
   requestAnimationFrame(() => {
     const first = overlay.querySelector('button:not([disabled]), input:not([disabled])');
     if (first) first.focus();
   });
 
   let busy = false;
+  function updateFeedback() {
+    const unresolved = [...overlay.querySelectorAll('.done-item')].filter(row => {
+      return !row.querySelector('.done-remove-check').checked && !row.querySelector('.done-skip-check').checked && !row.querySelector('.done-remaining').value.trim();
+    });
+    const feedback = overlay.querySelector('.cook-feedback');
+    feedback.textContent = unresolved.length ? `还有 ${unresolved.length} 项需要确认` : '余量已确认，准备记下这顿饭';
+    feedback.classList.toggle('needs-review', unresolved.length > 0);
+  }
   function syncRow(row) {
-    const disabled = row.querySelector('.done-remove-check').checked || row.querySelector('.done-skip-check').checked;
-    row.querySelectorAll('.done-remaining, .done-unit, .done-conversion-factor, [data-save-conversion]').forEach(el => { el.disabled = disabled; });
+    const remove = row.querySelector('.done-remove-check').checked;
+    const skip = row.querySelector('.done-skip-check').checked;
+    const remaining = row.querySelector('.done-remaining').value.trim();
+    const unit = row.querySelector('.done-unit').value.trim();
+    row.querySelector('.done-action').value = remove ? 'remove' : skip ? 'skip' : 'deduct';
+    row.querySelectorAll('.done-remaining, .done-unit, .done-conversion-factor, [data-save-conversion]').forEach(el => { el.disabled = remove || skip; });
+    row.querySelector('.cook-remaining-preview').textContent = remove ? '已用完' : skip ? '不扣减' : remaining ? `${remaining}${unit ? ' ' + unit : ''}` : '待确认';
+    updateFeedback();
   }
   function setBusy(value) {
     busy = value;
-    overlay.querySelectorAll('button, input, textarea').forEach(el => { el.disabled = value; });
+    overlay.querySelectorAll('button, input, textarea, select').forEach(el => { el.disabled = value; });
     if (!value) overlay.querySelectorAll('.done-item').forEach(syncRow);
   }
   overlay.querySelectorAll('.done-item').forEach(row => {
     row.addEventListener('input', event => {
-      if (event.target.matches('.done-remaining, .done-unit')) row.dataset.edited = '1';
+      if (event.target.matches('.done-remaining, .done-unit')) { row.dataset.edited = '1'; syncRow(row); }
     });
-    row.querySelectorAll('.done-remove-check, .done-skip-check').forEach(checkbox => {
-      checkbox.addEventListener('change', () => {
-        if (checkbox.checked) row.querySelector(checkbox.matches('.done-remove-check') ? '.done-skip-check' : '.done-remove-check').checked = false;
-        row.dataset.edited = '1';
-        syncRow(row);
-      });
+    row.querySelector('.done-action').addEventListener('change', event => {
+      row.querySelector('.done-remove-check').checked = event.target.value === 'remove';
+      row.querySelector('.done-skip-check').checked = event.target.value === 'skip';
+      row.dataset.edited = '1';
+      syncRow(row);
     });
   });
+  updateFeedback();
   function collectDraft() {
     return {
       notes: overlay.querySelector('#doneNotes').value,
@@ -2557,11 +2543,12 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null, draft = null
         unit: row.querySelector('.done-unit').value,
         remove: row.querySelector('.done-remove-check').checked,
         skip: row.querySelector('.done-skip-check').checked,
-      })),
+      })).filter(row => row.remove || row.skip || row.remaining.trim()),
     };
   }
   if (draft) {
     overlay.querySelector('#doneNotes').value = draft.notes;
+    if (draft.notes) overlay.querySelector('.cook-notes').open = true;
     overlay.querySelectorAll('.done-item').forEach(row => {
       const saved = draft.rows.find(item => item.id === row.dataset.inventoryId && item.version === matched.find(entry => entry.inventoryId === item.id)?.inventoryVersion);
       if (!saved) return;
@@ -2570,6 +2557,7 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null, draft = null
       row.querySelector('.done-remove-check').checked = saved.remove;
       row.querySelector('.done-skip-check').checked = saved.skip;
       row.dataset.edited = '1';
+      row.open = true;
       syncRow(row);
     });
   }
@@ -2597,12 +2585,14 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null, draft = null
           }
         });
         showToast(`已记住 ${item.name} 的单位换算`, 'success');
+        menuReadinessCache = null;
+        if (currentTab === 'menu') renderMenu();
         setBusy(false);
         close();
         if (currentScope === dialogScope) await showCookDoneDialog(recipeId, null, savedDraft);
       } catch (err) {
         setBusy(false);
-        showToast('保存换算失败: ' + err.message, 'error');
+        showDialogError('保存换算失败: ' + err.message);
       }
     });
   });
@@ -2612,6 +2602,31 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null, draft = null
     cookingDialogOpen = false;
     overlay.remove();
     if (prevFocus && document.contains(prevFocus) && typeof prevFocus.focus === 'function') prevFocus.focus();
+  };
+  function showDialogError(message) {
+    const error = overlay.querySelector('#cookError');
+    error.querySelector('span').textContent = message;
+    error.hidden = false;
+    error.scrollIntoView({ block: 'nearest' });
+  }
+  overlay.querySelector('#doneRefresh').onclick = async () => {
+    if (busy) return;
+    const saved = collectDraft();
+    if (currentScope !== dialogScope) { close(); return; }
+    setBusy(true);
+    try {
+      await fetchAllData();
+      setBusy(false);
+      close();
+      if (currentScope !== dialogScope) return;
+      const refreshedIds = batch ? [...getData().todayMenu] : recipeId;
+      renderCurrentTab();
+      if (batch && !refreshedIds.length) { showToast('今日菜单已经处理完成', 'info'); return; }
+      await showCookDoneDialog(refreshedIds, null, saved);
+    } catch (error) {
+      setBusy(false);
+      showDialogError('重新计算失败: ' + error.message);
+    }
   };
   overlay.querySelector('#doneClose').onclick = close;
   overlay.querySelector('#doneCancel').onclick = close;
@@ -2624,8 +2639,10 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null, draft = null
       const remove = row.querySelector('.done-remove-check').checked;
       const skip = row.querySelector('.done-skip-check').checked;
       const remaining = row.querySelector('.done-remaining').value.trim();
-      if (item.status !== 'ready' && !remove && !skip && !remaining) {
-        showToast(`请确认“${item.name}”的剩余量，或勾选本次保持不变`, 'error');
+      if (!remove && !skip && !remaining) {
+        row.open = true;
+        row.querySelector('.done-remaining').focus();
+        showDialogError(`请填写“${item.name}”的剩余量，或选择本次保持库存不变。`);
         return;
       }
       deductions.push({
@@ -2633,6 +2650,7 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null, draft = null
         remove, remaining: skip ? '' : remaining, unit: row.querySelector('.done-unit').value.trim(),
       });
     }
+    overlay.querySelector('#cookError').hidden = true;
     setBusy(true);
     try {
       await apiFetch(cookPath(endpoint), { method: 'POST', body: {
@@ -2640,7 +2658,7 @@ async function showCookDoneDialog(recipeId, suppliedPreview = null, draft = null
       } });
     } catch (error) {
       setBusy(false);
-      showToast('操作失败: ' + error.message, 'error');
+      showDialogError(error.message);
       return;
     }
     setBusy(false);
@@ -2737,130 +2755,96 @@ function debounce(fn, ms) {
 }
 
 // ===== Today Menu =====
+let menuReadinessCache = null;
+function menuReadinessKey(d) {
+  return JSON.stringify([currentScope, d.todayMenu, d.recipes, d.inventory, d.unitConversions]);
+}
+function ensureMenuReadiness(d) {
+  const key = menuReadinessKey(d);
+  if (menuReadinessCache?.key === key) return;
+  menuReadinessCache = { key, plan: null, failed: false };
+  apiFetch(scoped('/api/cook-batch/preview'), { method: 'POST', body: { recipeIds: [...d.todayMenu] } })
+    .then(plan => {
+      if (menuReadinessCache?.key !== key) return;
+      if (!Array.isArray(plan?.items)) throw new Error("Invalid menu plan");
+      menuReadinessCache.plan = plan;
+      if (currentTab === 'menu' && menuReadinessKey(getData()) === key) renderMenu();
+    })
+    .catch(() => {
+      if (menuReadinessCache?.key !== key) return;
+      menuReadinessCache.failed = true;
+      if (currentTab === 'menu' && menuReadinessKey(getData()) === key) renderMenu();
+    });
+}
+
 function renderMenu() {
   const d = getData();
   const menuIds = d.todayMenu || [];
-  const menuRecipes = d.recipes.filter(r => menuIds.includes(r.id));
+  const menuRecipes = menuIds.map(id => d.recipes.find(recipe => recipe.id === id)).filter(Boolean);
   const empty = document.getElementById('menuEmpty');
   const listDiv = document.getElementById('menuRecipeList');
   const shopDiv = document.getElementById('menuShoppingList');
-  const countSpan = document.getElementById('menuRecipeCount');
-  const clearBtn = document.getElementById('btnClearMenu');
-
-  const btnCookAll = document.getElementById('btnCookAll');
-  countSpan.textContent = menuIds.length ? `共 ${menuIds.length} 道菜` : '';
-  clearBtn.style.display = menuIds.length ? '' : 'none';
-  if (btnCookAll) btnCookAll.style.display = menuIds.length ? '' : 'none';
-
-  if (menuIds.length === 0) {
+  const preparedExpanded = shopDiv.querySelector('.prepared-list')?.open || false;
+  document.getElementById('menuDate').textContent = new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }).format(new Date());
+  document.getElementById('menuRecipeCount').textContent = menuIds.length ? `${menuIds.length} 道菜，刚刚好` : '';
+  document.getElementById('btnClearMenu').style.display = menuIds.length ? '' : 'none';
+  document.getElementById('btnCookAll').style.display = menuIds.length ? '' : 'none';
+  if (!menuIds.length) {
     empty.style.display = 'block';
     listDiv.innerHTML = '';
-    shopDiv.innerHTML = '';
+    shopDiv.innerHTML = `<div class="prep-note prep-note--empty"><span class="meal-eyebrow">备料清单</span><h3>选好菜，就知道要买什么</h3><p>这里会按菜单合并食材，并核对家中的库存。</p><div class="prep-note-rule"></div><p class="prep-note-tip">先看看家里有什么，也许今晚的灵感就在那里。</p></div>`;
     return;
   }
+  ensureMenuReadiness(d);
   empty.style.display = 'none';
+  listDiv.innerHTML = `<div class="meal-dishes">${menuRecipes.map(recipe => {
+    const lastCooked = recipe.cookedDates?.length ? `上次 ${formatRelativeDate(new Date(recipe.cookedDates.at(-1)))}` : '第一次尝试';
+    return `<article class="meal-dish recipe-card" data-id="${escAttr(recipe.id)}">
+      <div class="dish-mark" style="--dish-hue:${stringHue(recipe.name)}" aria-hidden="true">${I.cook}</div>
+      <div class="dish-copy"><button type="button" class="dish-title" data-menu-view="${escAttr(recipe.id)}">${esc(recipe.name)}</button>
+        <div class="dish-tags">${recipe.tags.slice(0, 2).map(tag => `<span>${esc(tag)}</span>`).join('')}</div>
+        <p class="dish-meta">${recipe.ingredients.length} 种食材 <span>·</span> ${recipe.steps.length} 步 <span>·</span> ${esc(lastCooked)}</p>
+      </div>
+      <div class="dish-actions"><button type="button" class="btn btn-sm dish-cook" data-menu-cook="${escAttr(recipe.id)}">${iconSvg('cook', 'icon-sm')} 做完了</button>
+        <button type="button" class="dish-remove" data-menu-remove="${escAttr(recipe.id)}" aria-label="将${escAttr(recipe.name)}移出菜单" title="移出菜单">${iconSvg('xmark', 'icon-sm')}</button>
+      </div>
+    </article>`;
+  }).join('')}</div><button type="button" class="meal-add-row" data-tab-go="recipes">${iconSvg('plus', 'icon-sm')} 再添一道喜欢的菜</button>`;
 
-  // Recipe cards — same style as recipe grid
-  listDiv.innerHTML = `<div class="menu-recipe-list">${menuRecipes.map(r => {
-    const stars = Array.from({length:5}, (_,i) =>
-      i < r.rating ? `<span class="star">${I.star}</span>` : `<span class="star-empty">${I.starEmpty}</span>`
-    ).join('');
-    const lastCooked = r.cookedDates.length
-      ? formatRelativeDate(new Date(r.cookedDates[r.cookedDates.length - 1]))
-      : '尚未做过';
-    return `
-      <div class="recipe-card in-menu" data-id="${escAttr(r.id)}">
-        <button class="card-menu-badge" data-menu-remove-card="${escAttr(r.id)}" title="点击从今日菜单移除">${iconSvg('menu', 'icon-sm')} 今日菜单 ${iconSvg('xmark', 'icon-sm')}</button>
-        <div class="card-name">${esc(r.name)}</div>
-        <div class="card-tags">${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
-        <div class="card-meta">
-          <span>🥬 ${r.ingredients.length}种食材</span>
-          <span>📝 ${r.steps.length}步</span>
-        </div>
-        <div class="card-meta" style="margin-top:4px">
-          <span>${stars}</span>
-          <span>${lastCooked}</span>
-        </div>
-        <div class="card-footer">
-          <span class="card-hint">点击查看详情 →</span>
-          <div style="display:flex;gap:4px;align-items:center">
-            <button class="btn btn-xs" data-menu-cook="${escAttr(r.id)}" style="border-color:var(--herb);color:var(--herb)" title="按菜谱默认用量扣减库存">${iconSvg('cook', 'icon-sm')} 做完了</button>
-            <button class="btn btn-xs" data-menu-cook-adjust="${escAttr(r.id)}" title="精确调整扣减量" style="padding:4px 7px;color:var(--text-muted)">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-            </button>
-            <button class="btn btn-xs" data-menu-remove="${escAttr(r.id)}" style="border-color:var(--chili);color:var(--chili)">${iconSvg('xmark', 'icon-sm')} 移除</button>
-          </div>
-        </div>
-      </div>`;
-  }).join('')}</div>`;
-
-  // Shopping list — aggregate ingredients across menu, split main vs seasoning
-  const neededMain = {};
-  const neededSeas = {};
-  menuRecipes.forEach(r => {
-    r.ingredients.forEach(ing => {
-      if (ing.optional) return;
-      const target = isSeasoning(ing.name) ? neededSeas : neededMain;
-      const key = normalizeIngredientName(ing.name);
-      if (!target[key]) target[key] = { name: ing.name, recipes: [], amounts: [] };
-      target[key].recipes.push(r.name);
-      target[key].amounts.push(ing.amount || '适量');
-    });
-  });
-
-  const mainItems = Object.values(neededMain);
-  const seasItems = Object.values(neededSeas);
-  const allItems = [...mainItems, ...seasItems];
-
-  let shopHtml = '';
-  if (allItems.length === 0) {
-    shopHtml = '<div class="shopping-empty">所有菜谱均无需非可选食材 ✅</div>';
-  } else {
-    const renderCard = (item, inStock) => {
-      const inv = findInventoryItem(item.name, d.inventory);
-      const recipes = item.recipes.map((r, i) => `${esc(r)} ${esc(item.amounts[i])}`).join(' · ');
-      const stockInfo = (inStock && inv && !isSeasoning(item.name)) ? `库存 ${esc(inv.amount)}${inv.unit ? ' ' + esc(inv.unit) : ''} · ` : '';
-      return `<div class="shopping-item ${inStock ? 'have' : 'missing'}">
-        <div class="shopping-item-head">
-          <span class="shopping-item-name">${esc(item.name)}</span>
-          ${inStock
-            ? `<span class="stock-tag stock-tag--have">有库存</span>`
-            : `<span class="stock-tag stock-tag--need" data-quick-add="${escAttr(item.name)}">待采购</span>`
-          }
-        </div>
-        <div class="shopping-item-detail"><span class="shopping-item-stock-hint">${stockInfo}</span>${recipes}</div>
-      </div>`;
-    };
-
-    const renderSection = (items, title) => {
-      const sorted = [...items].sort((a, b) => {
-        const aHave = findInventoryItem(a.name, d.inventory) ? 0 : 1;
-        const bHave = findInventoryItem(b.name, d.inventory) ? 0 : 1;
-        return aHave - bHave;
-      });
-      const haveCount = sorted.filter(i => findInventoryItem(i.name, d.inventory)).length;
-      const missingCount = sorted.length - haveCount;
-      const titleTag = title ? `<h3 style="${title === '🧂 调料' ? 'font-size:0.85rem;color:var(--clay);margin-top:16px' : ''}">${title}</h3>` : '';
-      const summary = `<div class="shopping-summary"><span class="stock-tag stock-tag--have">有库存 ${haveCount}</span><span class="stock-tag stock-tag--need">待采购 ${missingCount}</span></div>`;
-      return `${titleTag}${summary}<div class="shopping-list">${sorted.map(i => {
-        const inStock = !!findInventoryItem(i.name, d.inventory);
-        return renderCard(i, inStock);
-      }).join('')}</div>`;
-    };
-
-    shopHtml = `<div class="shopping-section">
-      <div class="shopping-header">
-        <h3>🛒 食材清单</h3>
-        <div class="shopping-actions">
-          <button class="btn btn-xs" data-shop-copy title="复制为文本"><span class="icon icon-sm"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span> 复制</button>
-          <button class="btn btn-xs" data-shop-image title="保存为图片"><span class="icon icon-sm"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></span> 图片</button>
-        </div>
-      </div>`;
-    shopHtml += renderSection(mainItems, '');
-    if (seasItems.length) shopHtml += renderSection(seasItems, '🧂 调料');
-    shopHtml += '</div>';
-  }
-  shopDiv.innerHTML = shopHtml;
+  const grouped = new Map();
+  menuRecipes.forEach(recipe => recipe.ingredients.filter(ingredient => !ingredient.optional).forEach(ingredient => {
+    const key = normalizeIngredientName(ingredient.name);
+    if (!grouped.has(key)) grouped.set(key, { name: ingredient.name, recipes: [], amounts: [] });
+    const item = grouped.get(key);
+    item.recipes.push(recipe.name);
+    item.amounts.push(ingredient.amount || '适量');
+  }));
+  const plan = menuReadinessCache?.plan;
+  const failed = menuReadinessCache?.failed;
+  const items = [...grouped.values()].map(item => ({ ...item, readiness: ingredientReadiness(item.name, plan, failed) }));
+  const prepared = items.filter(item => ['ready', 'pantry'].includes(item.readiness.status));
+  const rank = { missing: 0, short: 1, review: 2, checking: 3 };
+  const attention = items.filter(item => !['ready', 'pantry'].includes(item.readiness.status))
+    .sort((a, b) => rank[a.readiness.status] - rank[b.readiness.status]);
+  const purchaseCount = items.filter(item => ['missing', 'short'].includes(item.readiness.status)).length;
+  const reviewCount = items.filter(item => item.readiness.status === 'review').length;
+  const renderItem = item => {
+    const { status, label, detail, inventoryId } = item.readiness;
+    const inv = d.inventory.find(entry => entry.id === inventoryId) || findInventoryItem(item.name, d.inventory);
+    return `<div class="prep-item prep-item--${status}"><div class="prep-item-heading"><strong>${esc(item.name)}</strong><span class="prep-status prep-status--${status}">${esc(label)}</span></div>
+      <p class="prep-item-detail">${esc(detail)}</p>
+      <div class="prep-item-bottom"><span>${esc(item.amounts.join(' + '))}</span>${status === 'missing' ? `<button type="button" class="prep-inline-action" data-quick-add="${escAttr(item.name)}">入库 ${iconSvg('plus', 'icon-sm')}</button>` : status === 'short' && inv ? `<button type="button" class="prep-inline-action" data-stock-edit="${escAttr(inv.id)}">更新库存</button>` : ''}</div>
+      <details class="prep-sources"><summary>用于 ${esc([...new Set(item.recipes)].join('、'))}</summary><p>${item.recipes.map((name, i) => `${esc(name)}：${esc(item.amounts[i])}`).join('<br>')}</p></details>
+    </div>`;
+  };
+  shopDiv.innerHTML = `<div class="prep-note"><div class="prep-heading"><div><span class="meal-eyebrow">下厨之前</span><h3>备料清单</h3></div><span class="prep-total">${items.length} 项食材</span></div>
+    <div class="prep-summary" role="status">${!plan && !failed ? '正在按合计用量核对库存…' : failed ? '暂时无法核对库存' : purchaseCount || reviewCount ? `${purchaseCount ? `${purchaseCount} 项待采购` : ''}${purchaseCount && reviewCount ? ' · ' : ''}${reviewCount ? `${reviewCount} 项待确认` : ''}` : '食材已备齐，可以安心下厨了'}</div>
+    ${failed ? '<button type="button" class="prep-inline-action" data-menu-recheck>重新核对</button>' : ''}
+    <div class="prep-attention">${attention.map(renderItem).join('')}</div>
+    ${prepared.length ? `<details class="prepared-list" ${preparedExpanded ? 'open' : ''}><summary><span>${iconSvg('check', 'icon-sm')} 已备齐 ${prepared.length} 项</span><span class="prep-disclosure" aria-hidden="true"></span></summary><div>${prepared.map(renderItem).join('')}</div></details>` : ''}
+    ${!items.length ? '<p class="prep-empty-text">这些菜没有需要准备的必选食材。</p>' : ''}
+    <div class="prep-note-rule"></div><div class="prep-footer"><span>带上清单，再去采购</span><div><button type="button" class="btn btn-xs" data-shop-copy>复制清单</button><button type="button" class="btn btn-xs" data-shop-image>存为图片</button></div></div>
+  </div>`;
 }
 
 function buildShoppingPayload() {
@@ -2881,8 +2865,9 @@ function buildShoppingPayload() {
   const decorate = (item) => ({
     ...item,
     inv: findInventoryItem(item.name, d.inventory),
+    readiness: ingredientReadiness(item.name, menuReadinessCache?.key === menuReadinessKey(d) ? menuReadinessCache.plan : null, menuReadinessCache?.failed),
   });
-  const sortByStock = (a, b) => (a.inv ? 1 : 0) - (b.inv ? 1 : 0); // need first
+  const sortByStock = (a, b) => Number(['ready', 'pantry'].includes(a.readiness.status)) - Number(['ready', 'pantry'].includes(b.readiness.status)); // need first
   const main = Object.values(neededMain).map(decorate).sort(sortByStock);
   const seas = Object.values(neededSeas).map(decorate).sort(sortByStock);
   return { main, seas, menuNames: menuRecipes.map(r => r.name) };
@@ -2897,24 +2882,12 @@ function formatShoppingText() {
   lines.push('');
 
   const section = (title, items) => {
-    const need = items.filter(i => !i.inv);
-    const have = items.filter(i => i.inv);
-    if (!need.length && !have.length) return;
+    if (!items.length) return;
     lines.push(title);
-    if (need.length) {
-      lines.push('【待采购】');
-      need.forEach(i => {
-        const amtHint = i.amounts.length > 1 ? ` (${i.amounts.join(' + ')})` : (i.amounts[0] && i.amounts[0] !== '适量' ? ` ${i.amounts[0]}` : '');
-        lines.push(`  · ${i.name}${amtHint}`);
-      });
-    }
-    if (have.length) {
-      lines.push('【已有】');
-      have.forEach(i => {
-        const stock = i.inv.amount + (i.inv.unit ? ' ' + i.inv.unit : '');
-        lines.push(`  · ${i.name} (库存 ${stock})`);
-      });
-    }
+    items.forEach(item => {
+      lines.push(`  · ${item.name} [${item.readiness.label}] ${item.readiness.detail}`);
+      lines.push(`    菜谱用量：${item.amounts.join(' + ')}`);
+    });
     lines.push('');
   };
   section('主料:', main);
@@ -2942,158 +2915,56 @@ async function copyShoppingAsText() {
 function exportShoppingAsImage() {
   const { main, seas, menuNames } = buildShoppingPayload();
   if (!main.length && !seas.length) { showToast('清单为空', 'info'); return; }
-
-  const W = 520;
-  const PAD = 28;
-  const LINE = 26;
-  const dpr = window.devicePixelRatio || 1;
-
-  // Measure rows first to compute height
-  const sections = [];
-  const pushSection = (title, items) => {
-    const need = items.filter(i => !i.inv);
-    const have = items.filter(i => i.inv);
-    if (!need.length && !have.length) return;
-    sections.push({ type: 'section-title', text: title });
-    if (need.length) {
-      sections.push({ type: 'subhead', text: `待采购 ${need.length}` });
-      need.forEach(i => {
-        const amt = i.amounts.length > 1 ? i.amounts.join(' + ') : (i.amounts[0] && i.amounts[0] !== '适量' ? i.amounts[0] : '');
-        sections.push({ type: 'need', name: i.name, amount: amt });
-      });
-    }
-    if (have.length) {
-      sections.push({ type: 'subhead', text: `已有 ${have.length}`, muted: true });
-      have.forEach(i => {
-        const stock = i.inv.amount + (i.inv.unit ? ' ' + i.inv.unit : '');
-        sections.push({ type: 'have', name: i.name, stock });
-      });
-    }
-  };
-  pushSection('主料', main);
-  if (seas.length) pushSection('调料', seas);
-
-  // Approximate height
-  const headerH = 108 + (menuNames.length ? 22 : 0);
-  const footerH = 40;
-  const rowCount = sections.length;
-  const H = headerH + rowCount * LINE + footerH;
-
   const canvas = document.createElement('canvas');
-  canvas.width = W * dpr;
-  canvas.height = H * dpr;
   const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-
-  // Background (warm paper)
-  ctx.fillStyle = '#fdf8f0';
-  ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = '#7a4a2a';
-
-  const SANS = '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
-
-  // Header
-  ctx.font = `700 22px ${SANS}`;
-  ctx.fillStyle = '#3d2817';
-  ctx.fillText('🛒 采购清单', PAD, PAD + 22);
-  ctx.font = `400 13px ${SANS}`;
-  ctx.fillStyle = '#8a6f5a';
-  const today = new Date().toISOString().slice(0, 10);
-  ctx.fillText(today, PAD, PAD + 44);
-
-  if (menuNames.length) {
-    ctx.font = `500 13px ${SANS}`;
-    ctx.fillStyle = '#5a3e26';
-    const menuText = '今日菜单: ' + menuNames.join('、');
-    wrapText(ctx, menuText, PAD, PAD + 70, W - PAD * 2, 18);
-  }
-
-  // Divider
-  ctx.strokeStyle = '#d4b896';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(PAD, headerH - 12);
-  ctx.lineTo(W - PAD, headerH - 12);
-  ctx.stroke();
-
-  // Body rows
-  let y = headerH;
-  sections.forEach(s => {
-    if (s.type === 'section-title') {
-      y += 6;
-      ctx.font = `700 15px ${SANS}`;
-      ctx.fillStyle = '#3d2817';
-      ctx.fillText(s.text, PAD, y + 14);
-      y += LINE;
-    } else if (s.type === 'subhead') {
-      ctx.font = `600 12px ${SANS}`;
-      ctx.fillStyle = s.muted ? '#a08870' : '#c2410c';
-      ctx.fillText(s.text, PAD + 8, y + 14);
-      y += LINE;
-    } else if (s.type === 'need') {
-      ctx.fillStyle = '#c2410c';
-      ctx.beginPath(); ctx.arc(PAD + 16, y + 12, 3, 0, Math.PI * 2); ctx.fill();
-      ctx.font = `500 14px ${SANS}`;
-      ctx.fillStyle = '#3d2817';
-      ctx.fillText(s.name, PAD + 28, y + 16);
-      if (s.amount) {
-        ctx.font = `400 12px ${SANS}`;
-        ctx.fillStyle = '#8a6f5a';
-        const nameW = ctx.measureText(s.name).width + 28 + PAD + 8;
-        ctx.fillText(s.amount, nameW, y + 16);
-      }
-      y += LINE;
-    } else if (s.type === 'have') {
-      ctx.fillStyle = '#97a67b';
-      ctx.font = `400 12px ${SANS}`;
-      ctx.fillText('✓', PAD + 12, y + 16);
-      ctx.font = `400 14px ${SANS}`;
-      ctx.fillStyle = '#6b5a47';
-      ctx.fillText(s.name, PAD + 28, y + 16);
-      ctx.font = `400 11px ${SANS}`;
-      ctx.fillStyle = '#a08870';
-      const nameW = ctx.measureText(s.name).width + 28 + PAD + 8;
-      ctx.fillText(`(${s.stock})`, nameW, y + 16);
-      y += LINE;
+  const width = 560, pad = 32;
+  const family = '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+  const blocks = [];
+  function block(text, size = 14, color = '#4c6356', weight = 400, gap = 8) {
+    const font = `${weight} ${size}px ${family}`;
+    ctx.font = font;
+    const lines = [];
+    let line = '';
+    for (const char of text) {
+      if (line && ctx.measureText(line + char).width > width - pad * 2) { lines.push(line); line = ''; }
+      line += char;
     }
-  });
-
-  // Footer
-  ctx.font = `400 11px ${SANS}`;
-  ctx.fillStyle = '#a08870';
-  ctx.fillText('— 知食分子 KnowIngre —', PAD, H - 16);
-
-  // Download
+    if (line) lines.push(line);
+    blocks.push({ font, lines, color, lineHeight: size * 1.7, gap });
+  }
+  const date = localDateKey(new Date());
+  block('知食分子 / 备料清单', 23, '#203c30', 600, 5);
+  block(date, 12, '#66796d', 400, 12);
+  if (menuNames.length) block(`这餐准备做：${menuNames.join('、')}`, 13, '#4c6356', 400, 20);
+  for (const [title, items] of [['主料', main], ['调料', seas]]) {
+    if (!items.length) continue;
+    block(title, 16, '#356c50', 600, 12);
+    for (const item of items) {
+      const color = ['missing', 'short'].includes(item.readiness.status) ? '#855717' : '#203c30';
+      block(`${item.name}  ·  ${item.readiness.label}`, 15, color, 600, 2);
+      block(item.readiness.detail, 13, '#4c6356', 400, 2);
+      block(`菜谱用量：${item.amounts.join(' + ')}`, 12, '#66796d', 400, 16);
+    }
+  }
+  block('把想吃的安排好，再慢慢做一顿饭。', 12, '#66796d', 400, 0);
+  const height = Math.ceil(pad * 2 + blocks.reduce((total, item) => total + item.lines.length * item.lineHeight + item.gap, 0));
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = width * ratio;
+  canvas.height = height * ratio;
+  ctx.scale(ratio, ratio);
+  ctx.fillStyle = '#fbfcf5'; ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#8b9b70'; ctx.fillRect(0, 0, width, 5);
+  let y = pad;
+  for (const item of blocks) {
+    ctx.font = item.font; ctx.fillStyle = item.color;
+    for (const line of item.lines) { y += item.lineHeight; ctx.fillText(line, pad, y); }
+    y += item.gap;
+  }
   canvas.toBlob(blob => {
-    if (!blob) { showToast('生成失败', 'error'); return; }
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `采购清单-${today}.png`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    showToast('已保存为图片', 'success');
+    if (!blob) { showToast('生成失败，请重试', 'error'); return; }
+    downloadBlob(blob, `备料清单-${date}.png`);
+    showToast('备料清单已生成', 'success');
   }, 'image/png');
-}
-
-function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
-  // Simple char-wrap for mixed Chinese/English
-  let line = '';
-  let curY = y;
-  for (const ch of text) {
-    const testLine = line + ch;
-    const w = ctx.measureText(testLine).width;
-    if (w > maxWidth && line) {
-      ctx.fillText(line, x, curY);
-      line = ch;
-      curY += lineHeight;
-    } else {
-      line = testLine;
-    }
-  }
-  if (line) ctx.fillText(line, x, curY);
 }
 
 // ===== Recipe Sync =====
@@ -3273,6 +3144,18 @@ async function init() {
 
   // Menu delegation — remove from menu, mark cooked, quick-add ingredient
   document.getElementById('panel-menu').addEventListener('click', async (e) => {
+    const navigate = e.target.closest('[data-tab-go]');
+    if (navigate) { document.querySelector(`.tab[data-tab="${navigate.dataset.tabGo}"]`).click(); return; }
+    const view = e.target.closest('[data-menu-view]');
+    if (view) { openRecipeModal(view.dataset.menuView); return; }
+    const edit = e.target.closest('[data-stock-edit]');
+    if (edit) { openInventoryModal(edit.dataset.stockEdit); return; }
+    const recheck = e.target.closest('[data-menu-recheck]');
+    if (recheck) {
+      try { await withLoading(recheck, async () => { await fetchAllData(); menuReadinessCache = null; renderCurrentTab(); }); }
+      catch (error) { showToast('核对失败: ' + error.message, 'error'); }
+      return;
+    }
     if (e.target.closest('[data-shop-copy]')) { copyShoppingAsText(); return; }
     if (e.target.closest('[data-shop-image]')) { exportShoppingAsImage(); return; }
     const rmBtn = e.target.closest('[data-menu-remove]');

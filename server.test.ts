@@ -70,7 +70,7 @@ describe("database backup", () => {
 
 describe("static assets", () => {
   test("serves frontend modules while keeping database and backend files private", async () => {
-    for (const path of ["/", "/app.js", "/frontend/api.js", "/frontend/download.js", "/frontend/ai-recipe.js"]) {
+    for (const path of ["/", "/app.js", "/ui.css", "/frontend/api.js", "/frontend/download.js", "/frontend/ai-recipe.js", "/frontend/menu-readiness.js"]) {
       const response = await handle(new Request(`http://localhost${path}`));
       expect(response.status).toBe(200);
       if (path.endsWith(".js")) expect(response.headers.get("Content-Type")).toContain("application/javascript");
